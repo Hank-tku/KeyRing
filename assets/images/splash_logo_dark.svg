@@ -1,0 +1,40 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Splash screen logo - Dark mode (Compact & Centered) -->
+  <defs>
+    <linearGradient id="shieldGradientDark" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" style="stop-color:#2DD4BF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#14B8A6;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="lockGradientDark" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#E0F2FE;stop-opacity:1" />
+    </linearGradient>
+    <filter id="glowDark" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="6"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.176  0 0 0 0 0.831  0 0 0 0 0.749  0 0 0 0.5 0"/>
+    </filter>
+  </defs>
+  
+  <!-- Glow effect -->
+  <path d="M256 120 L400 165 L400 290 C400 360 340 410 256 435 C172 410 112 360 112 290 L112 165 Z" 
+        fill="url(#shieldGradientDark)" filter="url(#glowDark)" opacity="0.6"/>
+  
+  <!-- Shield base -->
+  <path d="M256 130 L390 170 L390 280 C390 340 335 385 256 405 C177 385 122 340 122 280 L122 170 Z" 
+        fill="url(#shieldGradientDark)"/>
+  
+  <!-- Shield border highlight -->
+  <path d="M256 130 L390 170 L390 280 C390 340 335 385 256 405 C177 385 122 340 122 280 L122 170 Z" 
+        fill="none" stroke="#FFFFFF" stroke-width="2" stroke-opacity="0.25" stroke-linejoin="round"/>
+  
+  <!-- Lock body -->
+  <rect x="216" y="230" width="80" height="95" rx="14" fill="url(#lockGradientDark)"/>
+  
+  <!-- Lock shackle -->
+  <path d="M223 230 L223 205 C223 182 236 169 256 169 C276 169 289 182 289 205 L289 230" 
+        fill="none" stroke="url(#lockGradientDark)" stroke-width="15" stroke-linecap="round"/>
+  
+  <!-- Keyhole -->
+  <circle cx="256" cy="265" r="11" fill="#2DD4BF"/>
+  <rect x="250" y="265" width="12" height="28" rx="6" fill="#2DD4BF"/>
+</svg>

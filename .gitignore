@@ -1,0 +1,149 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+
+# 操作系统自动生成的文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE 配置和缓存
+.vscode/
+.idea/
+*.iml
+*.iws
+*.ipr
+.atom/
+.buildlog/
+.history
+*.swp
+*.swo
+
+# Flutter/Dart/Pub 相关的构建缓存、依赖和配置文件
+**/doc/api/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+/build/
+pubspec.lock  # 对于应用程序项目，建议提交；对于库包，可忽略
+*.lock
+
+# Android 平台相关
+**/android/**/gradle-wrapper.jar
+**/android/.gradle/
+**/android/captures/
+**/android/gradlew
+**/android/gradlew.bat
+**/android/local.properties  # 包含本地SDK路径，务必忽略
+**/android/key.properties    # 可能包含签名密钥信息，务必忽略
+*.jks                        # Android签名文件，绝不可提交
+# 针对 Flutter Module 模式下的 .android 目录
+**/.android/**/gradle-wrapper.jar
+**/.android/.gradle/
+**/.android/captures/
+**/.android/gradlew
+**/.android/gradlew.bat
+**/.android/local.properties
+**/.android/key.properties
+
+# iOS 平台相关
+**/ios/**/*.mode1v3
+**/ios/**/*.mode2v3
+**/ios/**/*.moved-aside
+**/ios/**/*.pbxuser
+**/ios/**/*.perspectivev3
+**/ios/**/*sync/
+**/ios/**/.sconsign.dblite
+**/ios/**/.tags*
+**/ios/**/.vagrant/
+**/ios/**/DerivedData/
+**/ios/**/Icon?
+**/ios/**/Pods/
+**/ios/**/.symlinks/
+**/ios/**/profile
+**/ios/**/xcuserdata
+**/ios/.generated/
+**/ios/Flutter/.last_build_id
+**/ios/Flutter/App.framework
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/app.flx
+**/ios/Flutter/app.zip
+**/ios/Flutter/flutter_assets/
+**/ios/ServiceDefinitions.json
+**/ios/Runner/GeneratedPluginRegistrant.*
+# 针对 Flutter Module 模式下的 .ios 目录
+**/.ios/**/*.mode1v3
+**/.ios/**/*.mode2v3
+**/.ios/**/*.moved-aside
+**/.ios/**/*.pbxuser
+**/.ios/**/*.perspectivev3
+**/.ios/**/*sync/
+**/.ios/**/.sconsign.dblite
+**/.ios/**/.tags*
+**/.ios/**/.vagrant/
+**/.ios/**/DerivedData/
+**/.ios/**/Icon?
+**/.ios/**/Pods/
+**/.ios/**/.symlinks/
+**/.ios/**/profile
+**/.ios/**/xcuserdata
+**/.ios/.generated/
+**/.ios/Flutter/App.framework
+**/.ios/Flutter/Flutter.framework
+**/.ios/Flutter/Generated.xcconfig
+**/.ios/Flutter/app.flx
+**/.ios/Flutter/app.zip
+**/.ios/Flutter/flutter_assets/
+**/.ios/ServiceDefinitions.json
+**/.ios/Runner/GeneratedPluginRegistrant.*
