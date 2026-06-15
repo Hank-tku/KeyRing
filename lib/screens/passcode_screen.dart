@@ -25,6 +25,7 @@ class _PasscodeScreenState extends State<PasscodeScreen> {
       final bool authenticated = await _authService
           .authenticateWithSystemPassword();
 
+      if (!mounted) return;
       if (authenticated) {
         // 验证成功，先关闭当前页面，再回调
         Navigator.of(context).pop();
@@ -36,13 +37,16 @@ class _PasscodeScreenState extends State<PasscodeScreen> {
         ).showSnackBar(const SnackBar(content: Text('密码验证失败，请重试')));
       }
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('验证出错: $e')));
     } finally {
-      setState(() {
-        _isVerifying = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isVerifying = false;
+        });
+      }
     }
   }
 
@@ -69,11 +73,11 @@ class _PasscodeScreenState extends State<PasscodeScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            if (_isVerifying) ...{
+            if (_isVerifying) ...[
               const CircularProgressIndicator(),
               const SizedBox(height: 20),
               const Text('等待系统密码验证...'),
-            } else ...{
+            ] else ...[
               const Icon(Icons.lock, size: 64),
               const SizedBox(height: 20),
               const Text('需要验证系统密码'),
@@ -82,7 +86,7 @@ class _PasscodeScreenState extends State<PasscodeScreen> {
                 onPressed: _verifySystemPassword,
                 child: const Text('重新验证系统密码'),
               ),
-            },
+            ],
           ],
         ),
       ),

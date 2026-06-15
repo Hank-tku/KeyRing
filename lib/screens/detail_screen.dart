@@ -252,10 +252,7 @@ class _DetailScreenState extends State<DetailScreen> {
                     const SizedBox(width: 4),
                     Text(
                       '复制',
-                      style: TextStyle(
-                        color: Colors.grey[400],
-                        fontSize: 12,
-                      ),
+                      style: TextStyle(color: Colors.grey[400], fontSize: 12),
                     ),
                   ],
                 ),
@@ -268,11 +265,11 @@ class _DetailScreenState extends State<DetailScreen> {
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
             color: isEmpty
-                ? ThemeConfig.fillColor.withOpacity(0.5)
-                : ThemeConfig.inputBorderColor.withOpacity(0.3),
+                ? ThemeConfig.fillColor.withValues(alpha: 0.5)
+                : ThemeConfig.inputBorderColor.withValues(alpha: 0.3),
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
-              color: ThemeConfig.inputBorderColor.withOpacity(0.5),
+              color: ThemeConfig.inputBorderColor.withValues(alpha: 0.5),
               width: 1,
             ),
           ),

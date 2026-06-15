@@ -71,7 +71,7 @@ class AppIconPainter extends CustomPainter {
 
     // Shield fill
     final Paint shieldPaint = Paint()
-      ..color = Colors.white.withOpacity(0.95)
+      ..color = Colors.white.withValues(alpha: 0.95)
       ..style = PaintingStyle.fill;
     canvas.drawPath(shieldPath, shieldPaint);
 
@@ -145,5 +145,3 @@ class AppIconPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
-
-

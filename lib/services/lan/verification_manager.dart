@@ -1,4 +1,7 @@
 import 'dart:math';
+
+import 'package:flutter/foundation.dart';
+
 import 'connection_state_manager.dart';
 
 class VerificationManager {
@@ -35,7 +38,7 @@ class VerificationManager {
       ),
     );
 
-    print('Generated verification code: $code for peer: $peerId');
+    debugPrint('Generated verification code: $code for peer: $peerId');
     return code;
   }
 
@@ -51,10 +54,10 @@ class VerificationManager {
       _codeExpiry.remove(peerId);
 
       _stateManager.markAsVerified(peerId);
-      print('Verification successful for peer: $peerId');
+      debugPrint('Verification successful for peer: $peerId');
     } else {
       _stateManager.markAsError(peerId, 'Verification code mismatch');
-      print(
+      debugPrint(
         'Verification failed for peer: $peerId. Expected: $storedCode, Received: $code',
       );
     }
@@ -76,7 +79,7 @@ class VerificationManager {
       ),
     );
 
-    print('Removed verification code for peer: $peerId');
+    debugPrint('Removed verification code for peer: $peerId');
   }
 
   String? getStoredCode(String peerId) {
@@ -95,7 +98,9 @@ class VerificationManager {
 
   // 清除所有验证码
   void clearAllCodes() {
-    print('Clearing all verification codes. Count: ${_activeCodes.length}');
+    debugPrint(
+      'Clearing all verification codes. Count: ${_activeCodes.length}',
+    );
 
     for (final peerId in _activeCodes.keys) {
       _stateManager.updateState(
@@ -112,7 +117,7 @@ class VerificationManager {
     _peerNames.clear();
     _codeExpiry.clear();
 
-    print('All verification codes cleared');
+    debugPrint('All verification codes cleared');
   }
 
   // 新增：清除特定设备的验证码
@@ -131,7 +136,7 @@ class VerificationManager {
         ),
       );
 
-      print('Cleared verification code for peer: $peerId');
+      debugPrint('Cleared verification code for peer: $peerId');
     }
   }
 
@@ -159,7 +164,7 @@ class VerificationManager {
     }
 
     for (final peerId in expiredPeers) {
-      print('Removing expired verification code for peer: $peerId');
+      debugPrint('Removing expired verification code for peer: $peerId');
       _activeCodes.remove(peerId);
       _peerNames.remove(peerId);
       _codeExpiry.remove(peerId);

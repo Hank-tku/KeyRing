@@ -24,24 +24,23 @@ class _TestDialogScreenState extends State<TestDialogScreen> {
 
   Future<void> _showTestDialog() async {
     if (kDebugMode) {
-      print('📱 Showing test dialog');
+      debugPrint('📱 Showing test dialog');
     }
 
     // Add a delay to ensure UI is ready
     await Future.delayed(const Duration(milliseconds: 500));
 
     if (kDebugMode) {
-      print('📱 About to show dialog, context valid: ${context != null}');
-      print('📱 Context mounted: $mounted');
+      debugPrint('📱 Context mounted: $mounted');
     }
 
     // Use post-frame callback to ensure we show the dialog at the right time
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       try {
         if (kDebugMode) {
-          print('📱 In post-frame callback, showing test dialog');
-          print('📱 Context in post-frame callback: $context');
-          print('📱 Context mounted in post-frame callback: $mounted');
+          debugPrint('📱 In post-frame callback, showing test dialog');
+          debugPrint('📱 Context in post-frame callback: $context');
+          debugPrint('📱 Context mounted in post-frame callback: $mounted');
         }
 
         final String? result = await showDialog<String>(
@@ -50,10 +49,10 @@ class _TestDialogScreenState extends State<TestDialogScreen> {
           useRootNavigator: true, // Force use of root navigator
           builder: (BuildContext context) {
             if (kDebugMode) {
-              print(
+              debugPrint(
                 '📱 Building AlertDialog for test dialog in post-frame callback',
               );
-              print('📱 Builder context: $context');
+              debugPrint('📱 Builder context: $context');
             }
             return AlertDialog(
               title: const Text('Test Dialog'),
@@ -73,13 +72,13 @@ class _TestDialogScreenState extends State<TestDialogScreen> {
         );
 
         if (kDebugMode) {
-          print('📱 Test dialog closed with result: $result');
+          debugPrint('📱 Test dialog closed with result: $result');
         }
       } catch (e, stackTrace) {
         if (kDebugMode) {
-          print('📱 Error showing test dialog in post-frame callback');
-          print('📱 Error: $e');
-          print('📱 Stack trace: $stackTrace');
+          debugPrint('📱 Error showing test dialog in post-frame callback');
+          debugPrint('📱 Error: $e');
+          debugPrint('📱 Stack trace: $stackTrace');
         }
       }
     });

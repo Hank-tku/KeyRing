@@ -1,6 +1,5 @@
 // login_screen.dart
 import 'package:flutter/material.dart';
-import 'package:local_auth/local_auth.dart';
 import 'auth_service.dart';
 import 'passcode_screen.dart';
 // import 'package:flutter_native_splash/flutter_native_splash.dart';
@@ -11,7 +10,7 @@ class LoginScreen extends StatefulWidget {
   final VoidCallback onUnlocked;
 
   @override
-  _LoginScreenState createState() => _LoginScreenState();
+  State<LoginScreen> createState() => _LoginScreenState();
 }
 
 class _LoginScreenState extends State<LoginScreen> {
@@ -31,6 +30,7 @@ class _LoginScreenState extends State<LoginScreen> {
   // 在初始化时检查设备是否支持指纹
   Future<void> _checkBiometricSupport() async {
     final bool canAuthenticate = await _authService.canUseBiometrics();
+    if (!mounted) return;
     setState(() {
       _canUseFingerprint = canAuthenticate;
       _isCheckingBiometrics = false;
@@ -46,21 +46,20 @@ class _LoginScreenState extends State<LoginScreen> {
       // 1. 检查设备支持
       final bool canAuthenticate = await _authService.canUseBiometrics();
       if (!canAuthenticate) {
+        if (!mounted) return;
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('设备不支持指纹识别')));
         return;
       }
 
-      // 2. 获取可用识别类型（调试用）
-      final List<BiometricType> availableBiometrics = await _authService
-          .getAvailableBiometrics();
-
-      // 3. 执行认证
+      // 2. 执行认证
       final bool authenticated = await _authService
           .authenticateWithBiometrics();
 
-      // 4. 处理结果
+      if (!mounted) return;
+
+      // 3. 处理结果
       if (authenticated) {
         widget.onUnlocked(); // 注意：小写 w
       } else {
@@ -69,6 +68,7 @@ class _LoginScreenState extends State<LoginScreen> {
         ).showSnackBar(const SnackBar(content: Text('验证失败，请重试或使用密码解锁')));
       }
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('认证出错: $e')));

@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/password_item.dart';
 import '../services/password_repository.dart';
+import '../utils/password_utils.dart';
 import '../utils/theme_config.dart';
 
 class EditItemScreen extends StatefulWidget {
@@ -58,53 +59,6 @@ class _EditItemScreenState extends State<EditItemScreen> {
   Future<void> _saveOptionalExpanded(bool v) async {
     final SharedPreferences prefs = await SharedPreferences.getInstance();
     await prefs.setBool('edit_optional_expanded', v);
-  }
-
-  String _generatePassword({
-    int length = 16,
-    bool includeUppercase = true,
-    bool includeLowercase = true,
-    bool includeNumbers = true,
-    bool includeSymbols = true,
-  }) {
-    const String uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    const String lowercase = 'abcdefghijklmnopqrstuvwxyz';
-    const String numbers = '0123456789';
-    const String symbols = '!@#\$%^&*()_+-=[]{}|;:,.<>?';
-
-    String chars = '';
-    if (includeUppercase) chars += uppercase;
-    if (includeLowercase) chars += lowercase;
-    if (includeNumbers) chars += numbers;
-    if (includeSymbols) chars += symbols;
-
-    if (chars.isEmpty) chars = lowercase + numbers;
-
-    final List<String> passwordChars = [];
-    final random = DateTime.now().millisecondsSinceEpoch;
-
-    // 确保至少包含每种类型的字符
-    if (includeUppercase && passwordChars.length < length) {
-      passwordChars.add(uppercase[random % uppercase.length]);
-    }
-    if (includeLowercase && passwordChars.length < length) {
-      passwordChars.add(lowercase[random % lowercase.length]);
-    }
-    if (includeNumbers && passwordChars.length < length) {
-      passwordChars.add(numbers[random % numbers.length]);
-    }
-    if (includeSymbols && passwordChars.length < length) {
-      passwordChars.add(symbols[random % symbols.length]);
-    }
-
-    // 填充剩余长度
-    while (passwordChars.length < length) {
-      passwordChars.add(chars[random % chars.length]);
-    }
-
-    // 打乱顺序
-    passwordChars.shuffle();
-    return passwordChars.join();
   }
 
   Future<void> _showPasswordGenerator() async {
@@ -178,7 +132,7 @@ class _EditItemScreenState extends State<EditItemScreen> {
               ),
               TextButton(
                 onPressed: () {
-                  final String password = _generatePassword(
+                  final String password = PasswordUtils.generatePassword(
                     length: length,
                     includeUppercase: includeUppercase,
                     includeLowercase: includeLowercase,
@@ -221,6 +175,7 @@ class _EditItemScreenState extends State<EditItemScreen> {
       title,
       exceptId: widget.initial?.id,
     );
+    if (!mounted) return;
     if (exists) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -370,6 +325,7 @@ class _EditItemScreenState extends State<EditItemScreen> {
     String? help,
     required Widget control,
     bool alignWithField = false,
+    double? controlHeight,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -399,7 +355,10 @@ class _EditItemScreenState extends State<EditItemScreen> {
           ),
           const SizedBox(width: 8),
           Expanded(
-            child: SizedBox(height: help == null ? 40 : null, child: control),
+            child: SizedBox(
+              height: controlHeight ?? (help == null ? 40 : null),
+              child: control,
+            ),
           ),
         ],
       ),
@@ -600,11 +559,18 @@ class _EditItemScreenState extends State<EditItemScreen> {
             ),
             _buildFormItem(
               label: '备注',
+              alignWithField: true,
+              controlHeight: 120,
               control: TextField(
                 controller: _notesController,
-                minLines: 3,
-                maxLines: null,
-                style: const TextStyle(color: Colors.white, height: 1.5),
+                keyboardType: TextInputType.multiline,
+                textInputAction: TextInputAction.newline,
+                minLines: 4,
+                maxLines: 6,
+                style: const TextStyle(
+                  color: ThemeConfig.textColor,
+                  height: 1.5,
+                ),
                 decoration: const InputDecoration(
                   hintText: '如：安全问题答案、恢复邮箱等',
                   contentPadding: EdgeInsets.symmetric(

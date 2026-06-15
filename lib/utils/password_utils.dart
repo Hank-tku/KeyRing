@@ -30,7 +30,6 @@ class PasswordUtils {
     final random = Random.secure();
     final List<String> passwordChars = [];
     String? lastChar;
-    String? lastPool;
 
     // 确保每种类型至少有一个字符（且不连续相同）
     for (final pool in pools) {

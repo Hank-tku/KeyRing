@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -33,7 +34,7 @@ class DeviceService {
       return id;
     } catch (e) {
       // Fallback to SharedPreferences for Debug builds without keychain access
-      print('Secure storage unavailable, using SharedPreferences: $e');
+      debugPrint('Secure storage unavailable, using SharedPreferences: $e');
       final prefs = await SharedPreferences.getInstance();
       String? id = prefs.getString(_deviceIdKey);
       if (id == null) {

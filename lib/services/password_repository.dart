@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:io';
-
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -134,4 +132,6 @@ class PasswordRepository {
     final directory = await getApplicationDocumentsDirectory();
     return p.join(directory.path, _dbName);
   }
+
+  Future<String> databasePath() => _resolveDbPath();
 }

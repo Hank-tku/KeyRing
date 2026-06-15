@@ -1,23 +1,34 @@
+import 'package:flutter/foundation.dart';
+
 import '../../models/password_item.dart';
 import '../password_repository.dart';
+import 'sync_conflict_resolver.dart';
 
 class DataSyncEngine {
-  final PasswordRepository _repository;
+  DataSyncEngine(this._repository, {SyncConflictResolver? conflictResolver})
+    : _conflictResolver = conflictResolver ?? SyncConflictResolver();
 
-  DataSyncEngine(this._repository);
+  final PasswordRepository _repository;
+  final SyncConflictResolver _conflictResolver;
 
   Future<void> syncItemByTimestamp(PasswordItem remoteItem) async {
     final List<PasswordItem> localItems = _repository.itemsNotifier.value;
-    final PasswordItem? local = _findItemById(localItems, remoteItem.id);
+    final PasswordItem? local = _conflictResolver.findLocal(
+      localItems,
+      remoteItem.id,
+    );
 
-    if (local == null) {
-      await _repository.addItem(remoteItem);
-      print('Added new item: ${remoteItem.id}');
-    } else if (remoteItem.updatedAt.isAfter(local.updatedAt)) {
-      await _repository.updateItem(remoteItem);
-      print('Updated item: ${remoteItem.id}');
-    } else {
-      print('Local item is newer or same, skipping: ${remoteItem.id}');
+    switch (_conflictResolver.resolve(remote: remoteItem, local: local)) {
+      case SyncResolution.add:
+        await _repository.upsertPreserveTimestamps(remoteItem);
+        debugPrint('Added new item: ${remoteItem.id}');
+        break;
+      case SyncResolution.update:
+        await _repository.upsertPreserveTimestamps(remoteItem);
+        debugPrint('Updated item: ${remoteItem.id}');
+        break;
+      case SyncResolution.skip:
+        debugPrint('Local item is newer or same, skipping: ${remoteItem.id}');
     }
   }
 
@@ -28,20 +39,26 @@ class DataSyncEngine {
 
     for (final remoteItem in remoteItems) {
       final List<PasswordItem> localItems = _repository.itemsNotifier.value;
-      final PasswordItem? local = _findItemById(localItems, remoteItem.id);
+      final PasswordItem? local = _conflictResolver.findLocal(
+        localItems,
+        remoteItem.id,
+      );
 
-      if (local == null) {
-        await _repository.addItem(remoteItem);
-        addedCount++;
-      } else if (remoteItem.updatedAt.isAfter(local.updatedAt)) {
-        await _repository.updateItem(remoteItem);
-        updatedCount++;
-      } else {
-        skippedCount++;
+      switch (_conflictResolver.resolve(remote: remoteItem, local: local)) {
+        case SyncResolution.add:
+          await _repository.upsertPreserveTimestamps(remoteItem);
+          addedCount++;
+          break;
+        case SyncResolution.update:
+          await _repository.upsertPreserveTimestamps(remoteItem);
+          updatedCount++;
+          break;
+        case SyncResolution.skip:
+          skippedCount++;
       }
     }
 
-    print(
+    debugPrint(
       'Sync completed: $addedCount added, $updatedCount updated, $skippedCount skipped',
     );
   }
@@ -52,14 +69,5 @@ class DataSyncEngine {
 
   int getLocalItemCount() {
     return _repository.itemsNotifier.value.length;
-  }
-
-  PasswordItem? _findItemById(List<PasswordItem> items, String id) {
-    for (final item in items) {
-      if (item.id == id) {
-        return item;
-      }
-    }
-    return null;
   }
 }

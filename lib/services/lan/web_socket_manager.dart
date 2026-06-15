@@ -1,17 +1,17 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
-import 'connection_state_manager.dart';
 
 class WebSocketConnectionManager {
   final Map<String, WebSocketChannel> _channels = {};
   final Map<String, bool> _verifiedPeers = {};
-  final ConnectionStateManager _stateManager;
   final Map<String, StreamController<dynamic>> _messageControllers = {};
 
-  WebSocketConnectionManager(this._stateManager);
+  WebSocketConnectionManager();
 
   Future<WebSocketChannel> connectToPeer(
     String peerId,
@@ -39,7 +39,7 @@ class WebSocketConnectionManager {
         controller.add(message);
       },
       onError: (error) {
-        print('WebSocket error for $peerId: $error');
+        debugPrint('WebSocket error for $peerId: $error');
         controller.addError(error);
       },
       onDone: () {
@@ -63,7 +63,7 @@ class WebSocketConnectionManager {
         controller.add(message);
       },
       onError: (error) {
-        print('WebSocket error for $peerId: $error');
+        debugPrint('WebSocket error for $peerId: $error');
         controller.addError(error);
       },
       onDone: () {
@@ -87,7 +87,7 @@ class WebSocketConnectionManager {
       try {
         channel.sink.add(jsonEncode(message));
       } catch (e) {
-        print('Error sending message to $peerId: $e');
+        debugPrint('Error sending message to $peerId: $e');
       }
     }
   }

@@ -11,6 +11,9 @@ import 'package:key_ring/main.dart';
 import 'package:key_ring/models/password_item.dart';
 import 'package:key_ring/services/password_repository.dart';
 import 'package:key_ring/screens/lock_screen.dart';
+import 'package:key_ring/services/lan/sync_conflict_resolver.dart';
+import 'package:key_ring/services/lan/sync_protocol_codec.dart';
+import 'package:key_ring/utils/password_utils.dart';
 
 void main() {
   group('KeyRing App Tests', () {
@@ -65,13 +68,102 @@ void main() {
       expect(map['title'], equals('Test App'));
       expect(map['username'], equals('testuser'));
       expect(map['password'], equals('testpass123'));
-      expect(map['isFavorite'], isTrue);
+      expect(map['isFavorite'], equals(1));
 
       final restoredItem = PasswordItem.fromMap(map);
       expect(restoredItem.title, equals(item.title));
       expect(restoredItem.username, equals(item.username));
       expect(restoredItem.password, equals(item.password));
       expect(restoredItem.isFavorite, equals(item.isFavorite));
+    });
+
+    test(
+      'Password generator should produce varied secure-looking passwords',
+      () {
+        final Set<String> generated = <String>{};
+
+        for (int i = 0; i < 20; i++) {
+          final String password = PasswordUtils.generatePassword(length: 16);
+          generated.add(password);
+
+          expect(password.length, equals(16));
+          expect(password, matches(RegExp(r'[A-Z]')));
+          expect(password, matches(RegExp(r'[a-z]')));
+          expect(password, matches(RegExp(r'[0-9]')));
+          expect(
+            password,
+            matches(RegExp(r'[!@#\$%^&*()_+\-=\[\]{}|;:,.<>?]')),
+          );
+        }
+
+        expect(generated.length, greaterThan(1));
+      },
+    );
+
+    test('Sync conflict resolver should add update or skip by timestamp', () {
+      final SyncConflictResolver resolver = SyncConflictResolver();
+      final DateTime base = DateTime.utc(2026, 1, 1);
+      final PasswordItem local = PasswordItem(
+        id: 'same-id',
+        title: 'Local',
+        username: 'local',
+        password: 'local-pass',
+        updatedAt: base,
+      );
+
+      final PasswordItem olderRemote = local.copyWith(
+        title: 'Older',
+        updatedAt: base.subtract(const Duration(minutes: 1)),
+      );
+      final PasswordItem newerRemote = local.copyWith(
+        title: 'Newer',
+        updatedAt: base.add(const Duration(minutes: 1)),
+      );
+
+      expect(
+        resolver.resolve(remote: newerRemote, local: null),
+        SyncResolution.add,
+      );
+      expect(
+        resolver.resolve(remote: newerRemote, local: local),
+        SyncResolution.update,
+      );
+      expect(
+        resolver.resolve(remote: olderRemote, local: local),
+        SyncResolution.skip,
+      );
+      expect(resolver.findLocal(<PasswordItem>[local], 'same-id'), local);
+    });
+
+    test('Sync protocol codec should encode versioned sync data', () {
+      final SyncProtocolCodec codec = SyncProtocolCodec();
+      final PasswordItem item = PasswordItem(
+        id: 'sync-id',
+        title: 'Sync App',
+        username: 'sync-user',
+        password: 'sync-pass',
+        updatedAt: DateTime.utc(2026, 1, 2),
+      );
+
+      final Map<String, dynamic> message = codec.syncData(
+        items: <PasswordItem>[item],
+        vaultVersion: 1,
+        timestamp: DateTime.fromMillisecondsSinceEpoch(123),
+      );
+      final SyncDataPayload payload = codec.readSyncData(message);
+
+      expect(codec.messageType(message), SyncMessageType.syncData);
+      expect(message['protocolVersion'], equals(1));
+      expect(message['vaultVersion'], equals(1));
+      expect(message['timestamp'], equals(123));
+      expect(payload.isLegacyPeer, isFalse);
+      expect(payload.items.single.id, equals('sync-id'));
+
+      final SyncDataPayload legacyPayload = codec.readSyncData({
+        'type': SyncMessageType.syncData,
+        'items': <Map<String, dynamic>>[item.toMap()],
+      });
+      expect(legacyPayload.isLegacyPeer, isTrue);
     });
   });
 }

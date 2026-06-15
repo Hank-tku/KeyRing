@@ -1,17 +1,17 @@
 import 'dart:async';
+
 import 'package:bonsoir/bonsoir.dart';
+import 'package:flutter/foundation.dart';
 
 class ServiceDiscoveryManager {
   BonsoirBroadcast? _broadcast;
   BonsoirDiscovery? _discovery;
   StreamSubscription? _broadcastSub;
   StreamSubscription? _discoverySub;
+  Completer<Set<DiscoveredPeer>>? _discoveryCompleter;
+  Set<DiscoveredPeer>? _discoveredPeers;
 
   static const String serviceType = '_KeyRing._tcp';
-
-  // 提前停止发现的回调
-  Function(DiscoveredPeer)? _onValidPeerFound;
-  Completer<void>? _discoveryCompleter;
 
   Future<void> startBroadcast(
     String deviceId,
@@ -29,7 +29,7 @@ class ServiceDiscoveryManager {
     await _broadcast!.initialize();
     await _broadcast!.start();
 
-    print('Started broadcasting service: $deviceName on port $port');
+    debugPrint('Started broadcasting service: $deviceName on port $port');
   }
 
   Future<Set<DiscoveredPeer>> discoverPeers(
@@ -38,6 +38,8 @@ class ServiceDiscoveryManager {
   ) async {
     final Completer<Set<DiscoveredPeer>> completer = Completer();
     final Set<DiscoveredPeer> peers = {};
+    _discoveryCompleter = completer;
+    _discoveredPeers = peers;
 
     _discovery = BonsoirDiscovery(type: serviceType);
     await _discovery!.initialize();
@@ -48,35 +50,32 @@ class ServiceDiscoveryManager {
         final host = service.host;
         final port = service.port;
 
-        if (service != null) {
-          final peerId = service.attributes?['id'];
-          // 过滤自身
-          if (peerId == currentDeviceId) {
-            print('Filtering out self in discovery: $peerId');
-            return;
-          }
-          // 过滤自身和无效设备
-          if (peerId != null &&
-              peerId.isNotEmpty &&
-              host != null &&
-              host.isNotEmpty &&
-              port != null &&
-              port > 0) {
-            final peer = DiscoveredPeer(
-              id: peerId,
-              host: service.host ?? '',
-              port: service.port ?? 0,
-              name: service.name ?? 'Unknown Device',
-            );
-            peers.add(peer);
-            print('Discovered peer: ${peer.name} at ${peer.host}:${peer.port}');
-          }
+        final peerId = service.attributes['id'];
+        // 过滤自身
+        if (peerId == currentDeviceId) {
+          debugPrint('Filtering out self in discovery: $peerId');
+          return;
+        }
+        // 过滤自身和无效设备
+        if (peerId != null &&
+            peerId.isNotEmpty &&
+            host != null &&
+            host.isNotEmpty &&
+            port > 0) {
+          final peer = DiscoveredPeer(
+            id: peerId,
+            host: host,
+            port: port,
+            name: service.name,
+          );
+          peers.add(peer);
+          debugPrint(
+            'Discovered peer: ${peer.name} at ${peer.host}:${peer.port}',
+          );
         }
       } else if (event is BonsoirDiscoveryServiceFoundEvent) {
-        //print('Found service, attempting to resolve');
-        if (event.service != null) {
-          event.service!.resolve(_discovery!.serviceResolver);
-        }
+        //debugPrint('Found service, attempting to resolve');
+        event.service.resolve(_discovery!.serviceResolver);
       }
     });
 
@@ -93,21 +92,26 @@ class ServiceDiscoveryManager {
   }
 
   Future<void> stopDiscovery() async {
+    if (_discoveryCompleter != null && !_discoveryCompleter!.isCompleted) {
+      _discoveryCompleter!.complete(_discoveredPeers ?? <DiscoveredPeer>{});
+    }
     await _discoverySub?.cancel();
     await _discovery?.stop();
+    _discoveryCompleter = null;
+    _discoveredPeers = null;
     _discovery = null;
-    print('Stopped service discovery');
+    debugPrint('Stopped service discovery');
   }
 
   Future<void> stopBroadcast() async {
     await _broadcastSub?.cancel();
     await _broadcast?.stop();
     _broadcast = null;
-    print('Stopped service broadcast');
+    debugPrint('Stopped service broadcast');
   }
 
   void dispose() {
-    print('执行dispose');
+    debugPrint('执行dispose');
     _discoverySub?.cancel();
     _broadcastSub?.cancel();
     _discovery?.stop();

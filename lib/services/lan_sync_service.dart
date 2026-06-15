@@ -1,20 +1,22 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 
 import '../models/password_item.dart';
 import '../services/password_repository.dart';
+import '../services/vault_metadata_service.dart';
 import 'device_service.dart';
 
 // Import the manager classes
 import 'lan/connection_state_manager.dart';
 import 'lan/web_socket_manager.dart';
 import 'lan/verification_manager.dart';
-import 'lan/data_sync_engine.dart';
 import 'lan/service_discovery_manager.dart';
+import 'lan/sync_conflict_resolver.dart';
+import 'lan/sync_protocol_codec.dart';
 
 class LanSyncService {
   final PasswordRepository repository;
@@ -23,12 +25,17 @@ class LanSyncService {
   final ConnectionStateManager _stateManager;
   late final WebSocketConnectionManager _connectionManager;
   final VerificationManager _verificationManager;
-  final DataSyncEngine _syncEngine;
   final ServiceDiscoveryManager _discoveryManager;
+  final VaultMetadataService _metadataService;
+  final SyncConflictResolver _conflictResolver;
+  final SyncProtocolCodec _protocolCodec;
 
   final Map<String, String> _activeVerificationCodes = {};
   final Map<String, bool> _verifiedPeers = {};
   Function()? _onSyncSuccess;
+  Function(String message)? _onCompatibilityWarning;
+  bool _legacyPeerDetected = false;
+  bool _stopRequested = false;
 
   HttpServer? _server;
   String? _deviceId;
@@ -41,12 +48,13 @@ class LanSyncService {
 
   LanSyncService({required this.repository})
     : _stateManager = ConnectionStateManager(),
-      // _connectionManager = WebSocketConnectionManager(ConnectionStateManager()),
       _verificationManager = VerificationManager(ConnectionStateManager()),
-      _syncEngine = DataSyncEngine(repository),
-      _discoveryManager = ServiceDiscoveryManager() {
+      _discoveryManager = ServiceDiscoveryManager(),
+      _metadataService = VaultMetadataService(),
+      _conflictResolver = SyncConflictResolver(),
+      _protocolCodec = SyncProtocolCodec() {
     // Initialize connection manager with the state manager
-    _connectionManager = WebSocketConnectionManager(_stateManager);
+    _connectionManager = WebSocketConnectionManager();
   }
 
   Stream<Map<String, ConnectionState>> get connectionStateStream =>
@@ -70,7 +78,7 @@ class LanSyncService {
         _setupWebSocketServer();
       }
     } catch (e) {
-      print('启动服务准备失败: $e');
+      debugPrint('启动服务准备失败: $e');
       rethrow;
     }
   }
@@ -95,7 +103,7 @@ class LanSyncService {
           // 设置消息处理器
           _setupClientMessageHandlers(peerId);
         } catch (e) {
-          print('http服务升级WebSocket失败: $e');
+          debugPrint('http服务升级WebSocket失败: $e');
           req.response.statusCode = 500;
           req.response.write('Internal Server Error');
           req.response.close();
@@ -119,29 +127,28 @@ class LanSyncService {
   // 服务端：消息处理
   Future<void> _handleWebSocketMessage(dynamic message, String peerId) async {
     try {
-      final Map<String, dynamic> data =
-          jsonDecode(message as String) as Map<String, dynamic>;
-      final String type = data['type'] as String? ?? '';
+      final Map<String, dynamic> data = _protocolCodec.decodeMessage(message);
+      final String type = _protocolCodec.messageType(data);
 
       switch (type) {
-        case 'hello':
+        case SyncMessageType.hello:
           await _handleHelloMessage(data, peerId);
-          print('hello');
+          debugPrint('hello');
           break;
-        case 'verify_response':
+        case SyncMessageType.verifyResponse:
           await _handleVerifyResponse(data, peerId);
-          print('verify_response');
+          debugPrint('verify_response');
           break;
-        case 'sync_request':
+        case SyncMessageType.syncRequest:
           await _handleSyncRequest(peerId);
-          print('sync_request');
+          debugPrint('sync_request');
           break;
-        case 'sync_data':
-          print('sync_data before');
-          await _handleSyncData(data, peerId, false);
+        case SyncMessageType.syncData:
+          debugPrint('sync_data before');
+          await _handleSyncData(data, peerId);
           break;
-        case 'sync_complete':
-          print('sync_complete');
+        case SyncMessageType.syncComplete:
+          debugPrint('sync_complete');
           // 数据同步传输成功后关闭弹窗，并提示成功的消息
           if (_onSyncSuccess != null) {
             _onSyncSuccess!();
@@ -149,17 +156,17 @@ class LanSyncService {
           break;
         default:
           // 未知消息类型
-          _connectionManager.sendMessage(peerId, {
-            'type': 'error',
-            'message': '未知消息类型: $type',
-          });
+          _connectionManager.sendMessage(
+            peerId,
+            _protocolCodec.error('未知消息类型: $type'),
+          );
       }
     } catch (e) {
-      print('处理消息时出错$e');
-      _connectionManager.sendMessage(peerId, {
-        'type': 'error',
-        'message': '处理消息时出错: $e',
-      });
+      debugPrint('处理消息时出错$e');
+      _connectionManager.sendMessage(
+        peerId,
+        _protocolCodec.error('处理消息时出错: $e'),
+      );
     }
   }
 
@@ -169,14 +176,14 @@ class LanSyncService {
     String peerId,
   ) async {
     final String? clientDeviceId = data['deviceId'] as String?;
-    final String? clientDeviceName =
+    final String clientDeviceName =
         data['deviceName'] as String? ?? 'Unknown Device';
 
     if (clientDeviceId == null || clientDeviceId == _deviceId) {
-      _connectionManager.sendMessage(peerId, {
-        'type': 'error',
-        'message': 'Invalid device ID',
-      });
+      _connectionManager.sendMessage(
+        peerId,
+        _protocolCodec.error('Invalid device ID'),
+      );
       await _connectionManager.closeConnection(peerId);
       return;
     }
@@ -186,23 +193,23 @@ class LanSyncService {
     _activeVerificationCodes[peerId] = code;
 
     // 发送验证请求
-    _connectionManager.sendMessage(peerId, {
-      'type': 'verify_request',
-      'code': code,
-    });
+    _connectionManager.sendMessage(peerId, _protocolCodec.verifyRequest(code));
 
     // 显示验证码给用户（服务端）
     if (_onServerCodeDisplay != null) {
-      _onServerCodeDisplay!(clientDeviceName!, code, (bool approved) async {
+      _onServerCodeDisplay!(clientDeviceName, code, (bool approved) async {
         if (approved) {
           _connectionManager.markAsVerified(peerId);
-          _connectionManager.sendMessage(peerId, {'type': 'verify_success'});
-          print('客户端 $clientDeviceName 验证通过');
+          _connectionManager.sendMessage(
+            peerId,
+            _protocolCodec.verifySuccess(),
+          );
+          debugPrint('客户端 $clientDeviceName 验证通过');
         } else {
-          _connectionManager.sendMessage(peerId, {
-            'type': 'verify_failed',
-            'message': 'Server rejected the connection',
-          });
+          _connectionManager.sendMessage(
+            peerId,
+            _protocolCodec.verifyFailed('Server rejected the connection'),
+          );
           await _connectionManager.closeConnection(peerId);
         }
       });
@@ -220,12 +227,12 @@ class LanSyncService {
     if (receivedCode == expectedCode) {
       _connectionManager.markAsVerified(peerId);
       _activeVerificationCodes.remove(peerId);
-      _connectionManager.sendMessage(peerId, {'type': 'verify_success'});
+      _connectionManager.sendMessage(peerId, _protocolCodec.verifySuccess());
     } else {
-      _connectionManager.sendMessage(peerId, {
-        'type': 'verify_failed',
-        'message': '验证码错误',
-      });
+      _connectionManager.sendMessage(
+        peerId,
+        _protocolCodec.verifyFailed('验证码错误'),
+      );
       await _connectionManager.closeConnection(peerId);
     }
   }
@@ -233,54 +240,51 @@ class LanSyncService {
   // 服务端：消息处理-数据同步
   Future<void> _handleSyncRequest(String peerId) async {
     if (!_connectionManager.isVerified(peerId)) {
-      _connectionManager.sendMessage(peerId, {
-        'type': 'error',
-        'message': '验证码错误',
-      });
+      _connectionManager.sendMessage(peerId, _protocolCodec.error('验证码错误'));
       return;
     }
 
     // 获取本地数据并发送
-    final List<Map<String, dynamic>> items = repository.itemsNotifier.value
-        .map((PasswordItem e) => e.toMap())
-        .toList();
-
-    _connectionManager.sendMessage(peerId, {
-      'type': 'sync_data',
-      'items': items,
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-    });
+    _connectionManager.sendMessage(
+      peerId,
+      _protocolCodec.syncData(
+        items: repository.itemsNotifier.value,
+        vaultVersion: (await _metadataService.load()).vaultVersion,
+      ),
+    );
   }
 
-  Future<void> _handleSyncData(
-    Map<String, dynamic> data,
-    String peerId,
-    bool isClient,
-  ) async {
+  Future<void> _handleSyncData(Map<String, dynamic> data, String peerId) async {
     if (!_connectionManager.isVerified(peerId)) {
       return;
     }
 
-    final List<dynamic> items =
-        (data['items'] as List<dynamic>? ?? <dynamic>[]);
-    for (final dynamic raw in items) {
-      final PasswordItem remote = PasswordItem.fromMap(
-        raw as Map<String, dynamic>,
-      );
-      await _syncItemByTimestamp(remote, peerId);
+    final SyncDataPayload payload = _protocolCodec.readSyncData(data);
+
+    if (payload.isLegacyPeer) {
+      _legacyPeerDetected = true;
+      _onCompatibilityWarning?.call('对方版本较旧，建议升级后同步，避免冲突判断不准确。');
+    }
+
+    for (final PasswordItem remote in payload.items) {
+      await _syncItemByTimestamp(remote);
     }
   }
 
-  Future<void> _syncItemByTimestamp(PasswordItem remote, String peerId) async {
+  Future<void> _syncItemByTimestamp(PasswordItem remote) async {
     final List<PasswordItem> localItems = repository.itemsNotifier.value;
-    final PasswordItem? local = localItems
-        .where((item) => item.id == remote.id)
-        .firstOrNull;
+    final PasswordItem? local = _conflictResolver.findLocal(
+      localItems,
+      remote.id,
+    );
 
-    if (local == null) {
-      await repository.addItem(remote);
-    } else if (remote.updatedAt.isAfter(local.updatedAt)) {
-      await repository.updateItem(remote);
+    switch (_conflictResolver.resolve(remote: remote, local: local)) {
+      case SyncResolution.add:
+      case SyncResolution.update:
+        await repository.upsertPreserveTimestamps(remote);
+        break;
+      case SyncResolution.skip:
+        break;
     }
   }
 
@@ -295,10 +299,15 @@ class LanSyncService {
     _verifiedPeers.clear();
   }
 
-  void resetServer() async {
-    await _server?.close();
+  Future<void> resetServer() async {
+    await _server?.close(force: true);
     _server = null;
     _port = 0;
+  }
+
+  Future<void> stopSync() async {
+    _stopRequested = true;
+    await _cleanupResources();
   }
 
   void dispose() async {
@@ -315,24 +324,37 @@ class LanSyncService {
     required Function(String deviceName, Function(String) onCodeEntered)
     onClientCodeInput,
     Function()? onSyncSuccess,
+    Function(String message)? onCompatibilityWarning,
   }) async {
     _onServerCodeDisplay = onServerCodeDisplay;
     _onSyncSuccess = onSyncSuccess;
+    _onCompatibilityWarning = onCompatibilityWarning;
+    _legacyPeerDetected = false;
+    _stopRequested = false;
 
     try {
       await _ensureServerReady();
+      if (_stopRequested) {
+        return {'status': 'stopped', 'message': '同步已停止'};
+      }
 
       // 启动广播
       await _discoveryManager.startBroadcast(_deviceId!, _deviceName!, _port);
+      if (_stopRequested) {
+        return {'status': 'stopped', 'message': '同步已停止'};
+      }
 
       // 发现设备
       final peers = await _discoveryManager.discoverPeers(
         const Duration(seconds: 12),
         _deviceId!,
       );
+      if (_stopRequested) {
+        return {'status': 'stopped', 'message': '同步已停止'};
+      }
 
       if (peers.isEmpty) {
-        return {'status': false, 'message': '未找到设备'};
+        return {'status': 'error', 'message': '未找到设备'};
       }
 
       // Process only the first peer for now to avoid complexity
@@ -344,7 +366,15 @@ class LanSyncService {
 
           if (weAreClient) {
             await _syncAsClient(peer, onClientCodeInput);
-            return {'status': 'success', 'message': '同步成功'};
+            if (_stopRequested) {
+              return {'status': 'stopped', 'message': '同步已停止'};
+            }
+            return {
+              'status': 'success',
+              'message': _legacyPeerDetected
+                  ? '同步成功，对方版本较旧，建议升级后继续同步。'
+                  : '同步成功',
+            };
           } else {
             // 服务器角色，等待客户端连接
             // For server role, we should wait for incoming connections
@@ -354,7 +384,7 @@ class LanSyncService {
             // return {'status': 'success', 'message': '同步成功'};
           }
         } catch (e) {
-          print('局域网连接异常 ${peer.name}: $e');
+          debugPrint('局域网连接异常 ${peer.name}: $e');
           return {'status': 'error', 'message': '局域网连接异常'};
         }
       }
@@ -369,6 +399,7 @@ class LanSyncService {
     } finally {
       // 确保资源正确关闭
       await _cleanupResources();
+      _stopRequested = false;
     }
   }
 
@@ -379,9 +410,11 @@ class LanSyncService {
       await _discoveryManager.stopDiscovery();
       await _discoveryManager.stopBroadcast();
       _verificationManager.clearAllCodes();
+      await _server?.close(force: true);
       _server = null;
+      _port = 0;
     } catch (e) {
-      print('Error during cleanup: $e');
+      debugPrint('Error during cleanup: $e');
     }
   }
 
@@ -396,56 +429,67 @@ class LanSyncService {
     Timer? syncTimer; // 添加同步定时器变量
     try {
       // 连接对端设备
-      final channel = await _connectionManager.connectToPeer(
-        peer.id,
-        peer.host,
-        peer.port,
-      );
+      await _connectionManager.connectToPeer(peer.id, peer.host, peer.port);
 
       // 使用单一的消息监听器
       final Completer<bool> verificationCompleter = Completer<bool>();
       final Completer<void> syncCompleter = Completer<void>();
 
       // 设置消息监听器（只设置一次）
-      final subscription = _connectionManager.getMessageStream(peer.id).listen((
-        message,
-      ) async {
-        try {
-          final data = jsonDecode(message) as Map<String, dynamic>;
-          await _handleClientMessage(
-            peer,
-            data,
-            onClientCodeInput,
-            verificationCompleter,
-            syncCompleter,
+      final subscription = _connectionManager
+          .getMessageStream(peer.id)
+          .listen(
+            (message) async {
+              try {
+                final data = _protocolCodec.decodeMessage(message);
+                await _handleClientMessage(
+                  peer,
+                  data,
+                  onClientCodeInput,
+                  verificationCompleter,
+                  syncCompleter,
+                );
+              } catch (e) {
+                debugPrint('Error handling client message: $e');
+              }
+            },
+            onDone: () {
+              if (!verificationCompleter.isCompleted) {
+                verificationCompleter.complete(false);
+              }
+              if (!syncCompleter.isCompleted) {
+                syncCompleter.complete();
+              }
+            },
+            cancelOnError: true,
           );
-        } catch (e) {
-          print('Error handling client message: $e');
-        }
-      }, cancelOnError: true);
 
       // 发送hello消息开始握手
-      _connectionManager.sendMessage(peer.id, {
-        'type': 'hello',
-        'deviceId': _deviceId,
-        'deviceName': _deviceName,
-      });
+      _connectionManager.sendMessage(
+        peer.id,
+        _protocolCodec.hello(deviceId: _deviceId, deviceName: _deviceName),
+      );
 
       // 创建手动控制的定时器来处理验证超时
       verificationTimer = Timer(const Duration(seconds: 120), () {
         if (!verificationCompleter.isCompleted) {
-          print('验证超时: ${peer.name}');
+          debugPrint('验证超时: ${peer.name}');
           verificationCompleter.complete(false);
         }
       });
 
       final bool verified = await verificationCompleter.future;
+      if (_stopRequested) {
+        await subscription.cancel();
+        await _connectionManager.closeConnection(peer.id);
+        return;
+      }
 
       // 取消定时器，防止内存泄漏
       verificationTimer.cancel();
       verificationTimer = null;
 
-      print('验证：$verified');
+      debugPrint('验证：$verified');
       if (verified) {
         // 执行数据同步
         await _performClientSync(peer.id);
@@ -458,6 +502,11 @@ class LanSyncService {
         });
 
         await syncCompleter.future;
+        if (_stopRequested) {
+          await subscription.cancel();
+          await _connectionManager.closeConnection(peer.id);
+          return;
+        }
 
         // 取消同步定时器
         syncTimer.cancel();
@@ -469,7 +518,7 @@ class LanSyncService {
       await subscription.cancel();
       await _connectionManager.closeConnection(peer.id);
     } catch (e) {
-      print('客户端同步错误 ${peer.name}: $e');
+      debugPrint('客户端同步错误 ${peer.name}: $e');
       await _connectionManager.closeConnection(
         peerId,
       ); // Use stored peerId for cleanup
@@ -484,16 +533,17 @@ class LanSyncService {
   // 客户端：数据同步
   Future<void> _performClientSync(String peerId) async {
     // 请求对端数据
-    _connectionManager.sendMessage(peerId, {'type': 'sync_request'});
+    _connectionManager.sendMessage(peerId, _protocolCodec.syncRequest());
     await Future.delayed(const Duration(seconds: 1));
     // 发送本地数据
-    final List<Map<String, dynamic>> localData = _syncEngine
-        .getLocalDataForSync();
-    print('向服务端发送 sync_data');
-    _connectionManager.sendMessage(peerId, {
-      'type': 'sync_data',
-      'items': localData,
-    });
+    debugPrint('向服务端发送 sync_data');
+    _connectionManager.sendMessage(
+      peerId,
+      _protocolCodec.syncData(
+        items: repository.itemsNotifier.value,
+        vaultVersion: (await _metadataService.load()).vaultVersion,
+      ),
+    );
   }
 
   // 客户端：消息处理
@@ -505,57 +555,57 @@ class LanSyncService {
     Completer<void> syncCompleter,
   ) async {
     try {
-      final String type = data['type'] as String? ?? '';
+      final String type = _protocolCodec.messageType(data);
       switch (type) {
-        case 'verify_request':
+        case SyncMessageType.verifyRequest:
           final String? code = data['code'] as String?;
           if (code != null) {
             onCodeEntered(peer.name, (String inputCode) {
-              _connectionManager.sendMessage(peer.id, {
-                'type': 'verify_response',
-                'code': inputCode,
-              });
+              _connectionManager.sendMessage(
+                peer.id,
+                _protocolCodec.verifyResponse(inputCode),
+              );
             });
           }
-          print('verify_request');
+          debugPrint('verify_request');
           break;
 
-        case 'verify_success':
+        case SyncMessageType.verifySuccess:
           _connectionManager.markAsVerified(peer.id);
           if (!verificationCompleter.isCompleted) {
             verificationCompleter.complete(true);
           }
-          print('verify_success');
+          debugPrint('verify_success');
           break;
 
-        case 'verify_failed':
+        case SyncMessageType.verifyFailed:
           if (!verificationCompleter.isCompleted) {
             verificationCompleter.complete(false);
           }
-          print('verify_failed');
+          debugPrint('verify_failed');
           break;
 
-        case 'sync_data':
-          print('sync_data before');
-          await _handleSyncData(data, peer.id, true);
+        case SyncMessageType.syncData:
+          debugPrint('sync_data before');
+          await _handleSyncData(data, peer.id);
           if (!syncCompleter.isCompleted) {
             syncCompleter.complete();
           }
           break;
-        case 'sync_complete':
-          print('sync_complete');
+        case SyncMessageType.syncComplete:
+          debugPrint('sync_complete');
           // 数据同步传输成功后关闭连接，并提示成功的消息
           break;
 
         default:
-          print('消息类型错误 from ${peer.name}: $type');
+          debugPrint('消息类型错误 from ${peer.name}: $type');
       }
     } catch (e) {
-      print('处理消息时出错$e');
-      _connectionManager.sendMessage(peer.id, {
-        'type': 'error',
-        'message': '处理消息时出错: $e',
-      });
+      debugPrint('处理消息时出错$e');
+      _connectionManager.sendMessage(
+        peer.id,
+        _protocolCodec.error('处理消息时出错: $e'),
+      );
     }
   }
 }

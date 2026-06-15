@@ -67,7 +67,7 @@ class AppIconPainter extends CustomPainter {
 
     // Shield border
     final shieldBorderPaint = Paint()
-      ..color = Colors.white.withOpacity(0.2)
+      ..color = Colors.white.withValues(alpha: 0.2)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3 * scale;
     canvas.drawPath(shieldPath, shieldBorderPaint);

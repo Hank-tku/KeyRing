@@ -11,7 +11,7 @@ import '../utils/theme_config.dart';
 import 'package:flutter/foundation.dart';
 import 'lock_screen.dart';
 
-enum SyncState { idle, syncing, success, error }
+enum SyncState { idle, syncing, success, error, stopped }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, required this.repository});
@@ -70,29 +70,29 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.didChangeAppLifecycleState(state);
 
     if (kDebugMode) {
-      print('应用查看生命周期状态变化: $state');
+      debugPrint('应用查看生命周期状态变化: $state');
     }
 
     // 当应用从后台回到前台时，重新锁定屏幕
     if (state == AppLifecycleState.paused) {
       // 应用进入后台，可以在这里做一些处理（如记录时间）
       if (kDebugMode) {
-        print('后台');
+        debugPrint('后台');
       }
       // 显示锁定屏幕
       _showLockScreen();
     } else if (state == AppLifecycleState.resumed) {
       // 应用回到前台，显示锁定屏幕
       if (kDebugMode) {
-        print('前台，重新锁定');
+        debugPrint('前台，重新锁定');
       }
     } else if (state == AppLifecycleState.inactive) {
       if (kDebugMode) {
-        print('非活跃状态');
+        debugPrint('非活跃状态');
       }
     } else if (state == AppLifecycleState.detached) {
       if (kDebugMode) {
-        print('分离状态');
+        debugPrint('分离状态');
       }
     }
   }
@@ -248,7 +248,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (!mounted) return;
 
     setState(() => _syncState = SyncState.syncing);
-    final messenger = ScaffoldMessenger.of(context);
 
     try {
       final Map<String, dynamic>? result = await _lan?.discoverAndSyncOnce(
@@ -298,7 +297,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                   decoration: BoxDecoration(
                                     color: const Color(
                                       0xFF2DD4BF,
-                                    ).withOpacity(0.1),
+                                    ).withValues(alpha: 0.1),
                                     borderRadius: BorderRadius.circular(16),
                                     border: Border.all(
                                       color: const Color(0xFF2DD4BF),
@@ -332,11 +331,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             TextButton(
                               onPressed: () {
                                 Navigator.of(context).pop(false);
-                                print('关闭同步相关');
+                                debugPrint('关闭同步相关');
                                 if (mounted) {
-                                  setState(() => _syncState = SyncState.idle);
+                                  setState(
+                                    () => _syncState = SyncState.stopped,
+                                  );
                                 }
-                                _lan?.resetServer();
+                                _lan?.stopSync();
                               },
                               style: TextButton.styleFrom(
                                 foregroundColor: Colors.red,
@@ -370,6 +371,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             _showSnackBar('同步成功', Colors.green);
           }
         },
+        onCompatibilityWarning: (String message) {
+          if (mounted) {
+            _showSnackBar(message, Colors.orange);
+          }
+        },
         // Client callback: Input code shown on server
         onClientCodeInput:
             (String deviceName, Function(String) onCodeEntered) async {
@@ -382,6 +388,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
               try {
                 await Future.delayed(const Duration(milliseconds: 1000));
+                if (!mounted) {
+                  onCodeEntered('');
+                  return;
+                }
 
                 final String? inputCode = await showDialog<String>(
                   context: context,
@@ -450,10 +460,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       actions: <Widget>[
                         TextButton(
                           onPressed: () {
-                            print('取消同步关闭连接');
-                            // Removed dispose() call here as it's causing issues
+                            debugPrint('取消同步关闭连接');
                             Navigator.of(context).pop(null);
-                            dispose();
+                            _stopSync();
                           },
                           style: TextButton.styleFrom(
                             foregroundColor: Colors.red,
@@ -463,7 +472,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         TextButton(
                           onPressed: () {
                             final String code = codeController.text.trim();
-                            print('User entered code: $code');
+                            debugPrint('User entered code: $code');
                             if (code.isEmpty) {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
@@ -497,7 +506,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
                 onCodeEntered(inputCode ?? '');
               } catch (e) {
-                print('验证码输瑞错误: $e');
+                debugPrint('验证码输瑞错误: $e');
                 onCodeEntered('');
               } finally {
                 // codeController.dispose();
@@ -512,12 +521,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final String message = result?['message'] ?? '同步完成';
 
       // 状态配置映射
-      final Map<String, List<dynamic>> _statusMaps = {
+      final Map<String, List<dynamic>> statusMaps = {
         'success': [SyncState.success, Colors.green],
         'pending': [null, Colors.blue],
         'error': [SyncState.error, Colors.red],
+        'stopped': [SyncState.stopped, Colors.orange],
       };
-      final List? config = _statusMaps[status];
+      final List? config = statusMaps[status];
       if (config != null) {
         if (config[0] != null && mounted) {
           setState(() => _syncState = config[0]);
@@ -530,16 +540,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (!mounted) return;
       setState(() => _syncState = SyncState.error);
       _showSnackBar('同步失败: $e', Colors.red);
-    } finally {
-      if (!mounted) return;
-      // 状态短暂展示后恢复为 idle
-      final timer = Timer(const Duration(seconds: 2), () {
-        if (mounted) {
-          setState(() => _syncState = SyncState.idle);
-        }
-      });
-      _timers.add(timer);
     }
+  }
+
+  Future<void> _stopSync() async {
+    if (!mounted) return;
+    await _lan?.stopSync();
+    if (!mounted) return;
+    setState(() => _syncState = SyncState.stopped);
+    _showSnackBar('同步已停止', Colors.orange);
   }
 
   void _showSnackBar(String message, Color backgroundColor) {
@@ -549,7 +558,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         backgroundColor: backgroundColor,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        duration: Duration(seconds: 4),
+        duration: const Duration(seconds: 4),
       ),
     );
   }
@@ -575,34 +584,32 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ),
         actions: <Widget>[
           IconButton(
-            onPressed: _syncState == SyncState.syncing ? null : _sync,
+            onPressed: _syncState == SyncState.syncing ? _stopSync : _sync,
             icon: () {
               switch (_syncState) {
                 case SyncState.syncing:
-                  return const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  );
+                  return const Icon(Icons.stop_circle, color: Colors.orange);
                 case SyncState.success:
                   return const Icon(Icons.check_circle, color: Colors.green);
                 case SyncState.error:
                   return const Icon(Icons.error, color: Colors.red);
+                case SyncState.stopped:
+                  return const Icon(Icons.sync, color: Colors.orange);
                 case SyncState.idle:
-                default:
                   return const Icon(Icons.sync, color: Color(0xFF94A3B8));
               }
             }(),
             tooltip: () {
               switch (_syncState) {
                 case SyncState.syncing:
-                  return '同步中…';
+                  return '停止同步';
                 case SyncState.success:
-                  return '同步成功';
+                  return '同步成功，点击重新同步';
                 case SyncState.error:
-                  return '同步失败';
+                  return '同步失败，点击重新同步';
+                case SyncState.stopped:
+                  return '同步已停止，点击重新同步';
                 case SyncState.idle:
-                default:
                   return '局域网同步';
               }
             }(),
@@ -770,7 +777,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               : ThemeConfig.fillColor,
           boxShadow: [
             BoxShadow(
-              color: ThemeConfig.fillColor.withOpacity(0.1),
+              color: ThemeConfig.fillColor.withValues(alpha: 0.1),
               blurRadius: 4,
               offset: const Offset(0, 2),
             ),
@@ -863,7 +870,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ),
 
               // 操作按钮区域
-              Container(
+              SizedBox(
                 width: 150,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,

@@ -2,7 +2,6 @@
 import 'package:local_auth/local_auth.dart';
 // 删除旧的导入，替换为以下两行
 import 'package:local_auth_android/local_auth_android.dart';
-import 'package:local_auth_darwin/local_auth_darwin.dart';
 
 class AuthService {
   final LocalAuthentication _localAuth = LocalAuthentication();

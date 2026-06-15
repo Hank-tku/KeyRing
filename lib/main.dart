@@ -1,10 +1,10 @@
-import 'dart:io';
-
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'screens/home_screen.dart';
 import 'screens/lock_screen.dart';
+import 'services/migration_service.dart';
 import 'services/password_repository.dart';
 import 'utils/theme_config.dart';
 
@@ -12,7 +12,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // Initialize sqflite for desktop platforms
-  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+  if (!kIsWeb) {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
   }
@@ -20,6 +20,7 @@ Future<void> main() async {
   final PasswordRepository repository = PasswordRepository();
 
   await repository.init();
+  await MigrationService(repository: repository).prepareCompatibility();
   runApp(KeyRingApp(repository: repository));
 }
 
