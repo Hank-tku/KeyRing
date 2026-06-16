@@ -8,7 +8,7 @@ plugins {
 android {
     namespace = "com.example.key_ring"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = "26.3.11579264"
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -24,7 +24,7 @@ android {
         applicationId = "com.example.key_ring"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = 23  // Required for biometric authentication (Android 6.0+)
+        minSdk = maxOf(23, flutter.minSdkVersion) // Required for biometric authentication (Android 6.0+)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
