@@ -21,6 +21,10 @@ import 'lan/sync_protocol_codec.dart';
 class LanSyncService {
   final PasswordRepository repository;
 
+  static const bool _preferServerForLegacyRecovery = bool.fromEnvironment(
+    'KEYRING_RECOVERY_SERVER',
+  );
+
   // Managers
   final ConnectionStateManager _stateManager;
   late final WebSocketConnectionManager _connectionManager;
@@ -34,6 +38,7 @@ class LanSyncService {
   final Map<String, bool> _verifiedPeers = {};
   Function()? _onSyncSuccess;
   Function(String message)? _onCompatibilityWarning;
+  Completer<void>? _serverSyncCompleter;
   bool _legacyPeerDetected = false;
   bool _stopRequested = false;
 
@@ -65,7 +70,10 @@ class LanSyncService {
     try {
       // Get device ID and name
       final deviceService = DeviceService();
-      _deviceId ??= await deviceService.getOrCreateDeviceId();
+      final String storedDeviceId = await deviceService.getOrCreateDeviceId();
+      _deviceId ??= _preferServerForLegacyRecovery
+          ? 'zzzz-$storedDeviceId'
+          : storedDeviceId;
       _deviceName ??= await deviceService.getOrCreateDeviceName();
       // Start HTTP server for WebSocket signaling if not already started
       if (_server == null) {
@@ -149,10 +157,7 @@ class LanSyncService {
           break;
         case SyncMessageType.syncComplete:
           debugPrint('sync_complete');
-          // 数据同步传输成功后关闭弹窗，并提示成功的消息
-          if (_onSyncSuccess != null) {
-            _onSyncSuccess!();
-          }
+          _completeServerSync();
           break;
         default:
           // 未知消息类型
@@ -178,6 +183,16 @@ class LanSyncService {
     final String? clientDeviceId = data['deviceId'] as String?;
     final String clientDeviceName =
         data['deviceName'] as String? ?? 'Unknown Device';
+
+    if (_preferServerForLegacyRecovery &&
+        !clientDeviceName.toLowerCase().contains('android')) {
+      _connectionManager.sendMessage(
+        peerId,
+        _protocolCodec.error('Recovery sync only accepts Android devices.'),
+      );
+      await _connectionManager.closeConnection(peerId);
+      return;
+    }
 
     if (clientDeviceId == null || clientDeviceId == _deviceId) {
       _connectionManager.sendMessage(
@@ -269,6 +284,24 @@ class LanSyncService {
     for (final PasswordItem remote in payload.items) {
       await _syncItemByTimestamp(remote);
     }
+
+    _completeServerSync();
+  }
+
+  void _completeServerSync() {
+    final Completer<void>? completer = _serverSyncCompleter;
+    if (completer == null) {
+      return;
+    }
+
+    if (!completer.isCompleted) {
+      completer.complete();
+
+      // 数据同步传输成功后关闭弹窗，并提示成功的消息
+      if (_onSyncSuccess != null) {
+        _onSyncSuccess!();
+      }
+    }
   }
 
   Future<void> _syncItemByTimestamp(PasswordItem remote) async {
@@ -307,6 +340,10 @@ class LanSyncService {
 
   Future<void> stopSync() async {
     _stopRequested = true;
+    final Completer<void>? serverSyncCompleter = _serverSyncCompleter;
+    if (serverSyncCompleter != null && !serverSyncCompleter.isCompleted) {
+      serverSyncCompleter.complete();
+    }
     await _cleanupResources();
   }
 
@@ -329,6 +366,7 @@ class LanSyncService {
     _onServerCodeDisplay = onServerCodeDisplay;
     _onSyncSuccess = onSyncSuccess;
     _onCompatibilityWarning = onCompatibilityWarning;
+    _serverSyncCompleter = null;
     _legacyPeerDetected = false;
     _stopRequested = false;
 
@@ -357,12 +395,27 @@ class LanSyncService {
         return {'status': 'error', 'message': '未找到设备'};
       }
 
+      final Set<DiscoveredPeer> candidatePeers = _preferServerForLegacyRecovery
+          ? peers
+                .where(
+                  (DiscoveredPeer peer) =>
+                      peer.name.toLowerCase().contains('android'),
+                )
+                .toSet()
+          : peers;
+
+      if (candidatePeers.isEmpty) {
+        return {'status': 'error', 'message': '未找到旧手机'};
+      }
+
       // Process only the first peer for now to avoid complexity
-      if (peers.isNotEmpty) {
-        final peer = peers.first;
+      if (candidatePeers.isNotEmpty) {
+        final peer = _selectPeer(candidatePeers);
         try {
           // 角色判断：设备ID较大的作为客户端
-          final bool weAreClient = _deviceId!.compareTo(peer.id) < 0;
+          final bool weAreClient =
+              !_preferServerForLegacyRecovery &&
+              _deviceId!.compareTo(peer.id) < 0;
 
           if (weAreClient) {
             await _syncAsClient(peer, onClientCodeInput);
@@ -376,12 +429,17 @@ class LanSyncService {
                   : '同步成功',
             };
           } else {
-            // 服务器角色，等待客户端连接
-            // For server role, we should wait for incoming connections
-            // The server logic is handled by _setupWebSocketServer and related handlers
-            // We'll wait for a reasonable amount of time for the sync to complete
-            // await Future.delayed(const Duration(seconds: 15));
-            // return {'status': 'success', 'message': '同步成功'};
+            _serverSyncCompleter = Completer<void>();
+            await _waitForServerSync(peer);
+            if (_stopRequested) {
+              return {'status': 'stopped', 'message': '同步已停止'};
+            }
+            return {
+              'status': 'success',
+              'message': _legacyPeerDetected
+                  ? '同步成功，对方版本较旧，建议升级后继续同步。'
+                  : '同步成功',
+            };
           }
         } catch (e) {
           debugPrint('局域网连接异常 ${peer.name}: $e');
@@ -399,7 +457,48 @@ class LanSyncService {
     } finally {
       // 确保资源正确关闭
       await _cleanupResources();
+      _serverSyncCompleter = null;
       _stopRequested = false;
+    }
+  }
+
+  DiscoveredPeer _selectPeer(Set<DiscoveredPeer> peers) {
+    final List<DiscoveredPeer> orderedPeers = peers.toList()
+      ..sort((DiscoveredPeer a, DiscoveredPeer b) {
+        if (!_preferServerForLegacyRecovery) {
+          return 0;
+        }
+
+        final bool aIsAndroid = a.name.toLowerCase().contains('android');
+        final bool bIsAndroid = b.name.toLowerCase().contains('android');
+        if (aIsAndroid != bIsAndroid) {
+          return aIsAndroid ? -1 : 1;
+        }
+        return a.name.compareTo(b.name);
+      });
+
+    return orderedPeers.first;
+  }
+
+  Future<void> _waitForServerSync(DiscoveredPeer peer) async {
+    final Completer<void>? completer = _serverSyncCompleter;
+    if (completer == null) {
+      throw StateError('Server sync waiter was not initialized.');
+    }
+
+    final Timer timeoutTimer = Timer(const Duration(seconds: 150), () {
+      if (!completer.isCompleted) {
+        completer.completeError(TimeoutException('等待 ${peer.name} 同步超时'));
+      }
+    });
+
+    try {
+      await completer.future;
+    } on TimeoutException catch (e) {
+      debugPrint('服务端等待同步超时 ${peer.name}: $e');
+      throw Exception('等待对方完成同步超时');
+    } finally {
+      timeoutTimer.cancel();
     }
   }
 
@@ -583,6 +682,13 @@ class LanSyncService {
             verificationCompleter.complete(false);
           }
           debugPrint('verify_failed');
+          break;
+
+        case SyncMessageType.error:
+          if (!verificationCompleter.isCompleted) {
+            verificationCompleter.complete(false);
+          }
+          debugPrint('同步错误 from ${peer.name}: ${data['message']}');
           break;
 
         case SyncMessageType.syncData:
