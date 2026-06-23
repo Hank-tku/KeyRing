@@ -127,6 +127,14 @@ KeyRing 支持同一局域网内的设备同步数据，不需要登录云服务
 
 升级后建议先在单台设备打开应用确认数据正常，再进行多设备同步。
 
+## 数据导出
+
+升级前建议在首页点击导出按钮，生成一份 JSON 备份文件。文件会优先保存到系统下载目录的 KeyRing 文件夹中，导出成功后，文件路径会自动复制到剪贴板。
+
+导出的 JSON 会包含完整账号、用户名、密码、网址和备注，请只保存到可信位置，并避免上传到不受信任的云盘或聊天工具。
+
+v0.1.1 兼容过渡版本重点用于覆盖旧版安装后导出数据。后续切换正式签名版本前，请先完成数据导出。
+
 ## 数据安全说明
 
 KeyRing 的设计偏向本地使用：
@@ -180,8 +188,8 @@ Email: `zh_c@foxmail.com`
 
 ## 版本信息
 
-- 当前版本：0.1.1+1
-- Release tag：0.1.1
+- 当前版本：0.1.1+2
+- Release tag：v0.1.1
 - 应用类型：Flutter 跨平台本地密码管理器
 
 ## 从源码运行
@@ -207,7 +215,7 @@ flutter build macos --release
 构建 Android：
 
 ```bash
-flutter build apk --release
+flutter build apk --release --split-per-abi
 ```
 
 Android 构建需要本机安装 Java Runtime/JDK。

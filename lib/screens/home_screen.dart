@@ -5,6 +5,7 @@ import 'dart:async';
 import 'detail_screen.dart';
 import 'edit_item_screen.dart';
 import '../models/password_item.dart';
+import '../services/data_export_service.dart';
 import '../services/password_repository.dart';
 import '../services/lan_sync_service.dart';
 import '../utils/theme_config.dart';
@@ -29,6 +30,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   String _query = '';
   String? _visibleItemId;
   LanSyncService? _lan;
+  final DataExportService _dataExportService = DataExportService();
+  bool _exporting = false;
 
   // 同步状态
   SyncState _syncState = SyncState.idle;
@@ -551,6 +554,47 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _showSnackBar('同步已停止', Colors.orange);
   }
 
+  Future<void> _exportData() async {
+    if (_exporting) return;
+
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: const Text('导出数据'),
+        content: const Text('导出的 JSON 文件会包含完整账号、用户名、密码和备注。请只保存到你信任的位置，并妥善保管。'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('确认导出'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _exporting = true);
+    try {
+      final DataExportResult result = await _dataExportService.exportJson(
+        widget.repository.itemsNotifier.value,
+      );
+      if (!mounted) return;
+      await Clipboard.setData(ClipboardData(text: result.path));
+      _showSnackBar('已导出 ${result.itemCount} 条数据，路径已复制', Colors.green);
+    } catch (e) {
+      if (!mounted) return;
+      _showSnackBar('导出失败: $e', Colors.red);
+    } finally {
+      if (mounted) {
+        setState(() => _exporting = false);
+      }
+    }
+  }
+
   void _showSnackBar(String message, Color backgroundColor) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -583,6 +627,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           fontWeight: FontWeight.w500,
         ),
         actions: <Widget>[
+          IconButton(
+            onPressed: _exporting ? null : _exportData,
+            icon: _exporting
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.download, color: Color(0xFF94A3B8)),
+            tooltip: '导出数据',
+          ),
           IconButton(
             onPressed: _syncState == SyncState.syncing ? _stopSync : _sync,
             icon: () {

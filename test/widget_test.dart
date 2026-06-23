@@ -5,15 +5,21 @@
 // gestures. You can also use WidgetTester to find child widgets in the widget
 // tree, read text, and verify that the values of widget properties are correct.
 
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:key_ring/main.dart';
 import 'package:key_ring/models/password_item.dart';
+import 'package:key_ring/services/data_export_service.dart';
 import 'package:key_ring/services/password_repository.dart';
 import 'package:key_ring/screens/lock_screen.dart';
 import 'package:key_ring/services/lan/sync_conflict_resolver.dart';
 import 'package:key_ring/services/lan/sync_protocol_codec.dart';
 import 'package:key_ring/utils/password_utils.dart';
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   group('KeyRing App Tests', () {
@@ -165,7 +171,87 @@ void main() {
       });
       expect(legacyPayload.isLegacyPeer, isTrue);
     });
+
+    test(
+      'Data export writes JSON backup to Downloads KeyRing folder',
+      () async {
+        final Directory downloads = await Directory.systemTemp.createTemp(
+          'keyring-downloads-',
+        );
+        final Directory documents = await Directory.systemTemp.createTemp(
+          'keyring-documents-',
+        );
+        PathProviderPlatform.instance = FakePathProviderPlatform(
+          downloadsPath: downloads.path,
+          documentsPath: documents.path,
+        );
+        SharedPreferences.setMockInitialValues(<String, Object>{
+          'vault_version': 1,
+        });
+
+        final PasswordItem item = PasswordItem(
+          id: 'export-id',
+          title: 'Export App',
+          username: 'export-user',
+          password: 'export-pass',
+          notes: 'export-notes',
+          updatedAt: DateTime.utc(2026, 1, 3),
+        );
+
+        final DataExportResult result = await DataExportService().exportJson(
+          <PasswordItem>[item],
+        );
+
+        expect(result.itemCount, equals(1));
+        expect(result.path, startsWith('${downloads.path}/KeyRing/'));
+        expect(result.path, endsWith('.json'));
+
+        final Map<String, dynamic> exported =
+            jsonDecode(await File(result.path).readAsString())
+                as Map<String, dynamic>;
+        expect(exported['app'], equals('KeyRing'));
+        expect(exported['exportVersion'], equals(1));
+        expect(exported['vaultVersion'], equals(1));
+        expect(exported['itemCount'], equals(1));
+        expect(
+          (exported['items'] as List<dynamic>).single['password'],
+          'export-pass',
+        );
+      },
+    );
+
+    test('Data export falls back to documents exports folder', () async {
+      final Directory documents = await Directory.systemTemp.createTemp(
+        'keyring-documents-fallback-',
+      );
+      PathProviderPlatform.instance = FakePathProviderPlatform(
+        documentsPath: documents.path,
+      );
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'vault_version': 1,
+      });
+
+      final DataExportResult result = await DataExportService().exportJson(
+        <PasswordItem>[],
+      );
+
+      expect(result.path, startsWith('${documents.path}/exports/'));
+      expect(await File(result.path).exists(), isTrue);
+    });
   });
+}
+
+class FakePathProviderPlatform extends PathProviderPlatform {
+  FakePathProviderPlatform({this.downloadsPath, required this.documentsPath});
+
+  final String? downloadsPath;
+  final String documentsPath;
+
+  @override
+  Future<String?> getDownloadsPath() async => downloadsPath;
+
+  @override
+  Future<String?> getApplicationDocumentsPath() async => documentsPath;
 }
 
 // 模拟的 PasswordRepository 类
