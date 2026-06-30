@@ -15,7 +15,25 @@ permissions:
   contents: write
 
 jobs:
+  # 前置 job：先创建 release，其余 job 上传 asset 时 release 必然已存在，
+  # 避免"最早跑完的 job 撞上 release 未创建导致静默不上传"。
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create draft release if missing
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          draft: false
+
   windows:
+    name: Windows zip
+    runs-on: windows-latest
+    needs: create-release
+
     name: Windows zip
     runs-on: windows-latest
 
@@ -63,6 +81,7 @@ jobs:
   android:
     name: Android APK (split per ABI)
     runs-on: ubuntu-latest
+    needs: create-release
 
     steps:
       - name: Checkout
@@ -111,6 +130,7 @@ jobs:
   macos:
     name: macOS app
     runs-on: macos-latest
+    needs: create-release
 
     steps:
       - name: Checkout
@@ -155,6 +175,7 @@ jobs:
   ios:
     name: iOS unsigned app
     runs-on: macos-latest
+    needs: create-release
 
     steps:
       - name: Checkout
