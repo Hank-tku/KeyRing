@@ -53,10 +53,14 @@ android {
 
     buildTypes {
         release {
-            if (!hasReleaseKeystore) {
-                throw GradleException("Missing android/key.properties for release signing.")
+            if (hasReleaseKeystore) {
+                // 正式发布：本地有 key.properties 时用 release keystore 签名
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                // CI / 无 keystore 环境：fallback 到 debug 签名，
+                // 仍可生成可安装运行的 APK（仅非正式签名）。
+                signingConfig = signingConfigs.getByName("debug")
             }
-            signingConfig = signingConfigs.getByName("release")
         }
     }
 }
