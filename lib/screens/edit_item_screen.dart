@@ -5,6 +5,10 @@ import '../models/password_item.dart';
 import '../services/password_repository.dart';
 import '../utils/password_utils.dart';
 import '../utils/theme_config.dart';
+import '../widgets/shared/app_card.dart';
+import '../widgets/shared/form_field_row.dart';
+import '../widgets/shared/password_visibility_toggle.dart';
+import '../widgets/shared/strength_indicator.dart';
 
 class EditItemScreen extends StatefulWidget {
   const EditItemScreen({super.key, required this.repository, this.initial});
@@ -25,7 +29,9 @@ class _EditItemScreenState extends State<EditItemScreen> {
   bool _isFavorite = false;
   bool _obscure = true;
   bool _optionalExpanded = false;
-  // Removed unused _isGenerating to satisfy lints
+
+  // 是否有未保存改动，用于返回拦截。
+  bool _dirty = false;
 
   @override
   void initState() {
@@ -38,6 +44,19 @@ class _EditItemScreenState extends State<EditItemScreen> {
     _notesController = TextEditingController(text: item?.notes ?? '');
     _isFavorite = item?.isFavorite ?? false;
     _loadOptionalExpanded();
+
+    // 任一输入变化即标记为脏。
+    for (final TextEditingController c in <TextEditingController>[
+      _titleController,
+      _usernameController,
+      _passwordController,
+      _urlController,
+      _notesController,
+    ]) {
+      c.addListener(() {
+        if (!_dirty) setState(() => _dirty = true);
+      });
+    }
   }
 
   @override
@@ -153,6 +172,7 @@ class _EditItemScreenState extends State<EditItemScreen> {
       setState(() {
         _passwordController.text = result;
         _obscure = false;
+        _dirty = true;
       });
     }
   }
@@ -163,10 +183,7 @@ class _EditItemScreenState extends State<EditItemScreen> {
     final String password = _passwordController.text.trim();
     if (title.isEmpty || password.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('账号名和密码不能为空'),
-          behavior: SnackBarBehavior.floating,
-        ),
+        const SnackBar(content: Text('账号名和密码不能为空')),
       );
       return;
     }
@@ -178,10 +195,7 @@ class _EditItemScreenState extends State<EditItemScreen> {
     if (!mounted) return;
     if (exists) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('账号名已存在，请使用其他账号名'),
-          behavior: SnackBarBehavior.floating,
-        ),
+        const SnackBar(content: Text('账号名已存在，请使用其他账号名')),
       );
       return;
     }
@@ -215,315 +229,235 @@ class _EditItemScreenState extends State<EditItemScreen> {
     if (mounted) Navigator.of(context).pop(true);
   }
 
+  Future<void> _delete() async {
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: const Text('确认删除'),
+        content: Text('确定要删除"${widget.initial?.title}"吗？此操作无法撤销。'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: TextButton.styleFrom(foregroundColor: ThemeConfig.dangerColor),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      try {
+        await widget.repository.removeItem(widget.initial!.id);
+        if (mounted) Navigator.of(context).pop(true);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('删除失败: $e')),
+          );
+        }
+      }
+    }
+  }
+
+  /// 返回拦截：有未保存改动时询问。
+  Future<bool> _confirmExit() async {
+    if (!_dirty) return true;
+    final bool? discard = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: const Text('放弃修改？'),
+        content: const Text('你有未保存的修改，确定要离开吗？'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('继续编辑'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: TextButton.styleFrom(foregroundColor: ThemeConfig.dangerColor),
+            child: const Text('放弃'),
+          ),
+        ],
+      ),
+    );
+    return discard ?? false;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.initial == null ? '新增密码' : '编辑密码'),
-        iconTheme: const IconThemeData(
-          color: Colors.white, // 将返回按钮等图标的颜色设置为白色
-        ),
-        titleTextStyle: const TextStyle(
-          color: Color(0xFF2DD4BF),
-          fontSize: 22,
-          fontWeight: FontWeight.w500,
-        ),
-        actions: <Widget>[
-          IconButton(
-            onPressed: _save,
-            icon: const Icon(Icons.save),
-            color: Colors.white,
-
-            tooltip: '保存',
+    final bool isEditing = widget.initial != null;
+    return PopScope(
+      canPop: !_dirty,
+      onPopInvokedWithResult: (bool didPop, Object? result) async {
+        if (didPop) return;
+        final NavigatorState navigator = Navigator.of(context);
+        final bool shouldExit = await _confirmExit();
+        if (shouldExit && mounted) {
+          navigator.pop();
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(isEditing ? '编辑密码' : '新增密码'),
+          titleTextStyle: const TextStyle(
+            color: ThemeConfig.primaryColor,
+            fontSize: ThemeConfig.fontSizeTitle,
+            fontWeight: FontWeight.w500,
           ),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
-        children: <Widget>[
-          // Ant Design 风格表单分组：基本信息
-          _buildFormSection(
-            title: '基本信息',
-            children: <Widget>[
-              _buildFormItem(
-                label: '账号名',
-                help: '网站或应用名称',
-                control: TextField(
-                  controller: _titleController,
-                  style: const TextStyle(color: ThemeConfig.textColor),
-                  decoration: const InputDecoration(
-                    hintText: '如：GitHub/微信',
-                    isDense: true,
-                    contentPadding: EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                  ),
-                ),
+          actions: <Widget>[
+            if (isEditing)
+              IconButton(
+                onPressed: _delete,
+                icon: const Icon(Icons.delete_outline),
+                tooltip: '删除',
               ),
-              _buildFormItem(
-                label: '用户名',
-                help: '登录用的用户名或邮箱',
-                control: TextField(
-                  controller: _usernameController,
-                  style: const TextStyle(color: ThemeConfig.textColor),
-                  decoration: const InputDecoration(
-                    hintText: '如：name@example.com',
-                    isDense: true,
-                    contentPadding: EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                  ),
-                ),
-              ),
-              _buildPasswordItem(),
-            ],
-          ),
-
-          const SizedBox(height: 12),
-
-          // Ant Design 风格表单分组：可选信息（可折叠，默认收起）
-          _buildOptionalSection(),
-
-          const SizedBox(height: 8),
-        ],
-      ),
-    );
-  }
-
-  // Ant Design 风格：分组卡片
-  Widget _buildFormSection({
-    required String title,
-    required List<Widget> children,
-  }) {
-    return Card(
-      color: ThemeConfig.fillColor,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(
-              title,
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.w600,
-                color: ThemeConfig.textColor,
-              ),
+            IconButton(
+              onPressed: _save,
+              icon: const Icon(Icons.save_outlined),
+              tooltip: '保存',
             ),
-            const SizedBox(height: 12),
-            ...children,
           ],
         ),
-      ),
-    );
-  }
-
-  // Ant Design 风格：表单项（左标签右控件）
-  Widget _buildFormItem({
-    required String label,
-    String? help,
-    required Widget control,
-    bool alignWithField = false,
-    double? controlHeight,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        crossAxisAlignment: alignWithField
-            ? CrossAxisAlignment.start
-            : CrossAxisAlignment.center,
-        children: <Widget>[
-          SizedBox(
-            width: 72,
-            child: SizedBox(
-              height: 40,
-              child: Align(
-                alignment: alignWithField
-                    ? Alignment.topCenter
-                    : Alignment.center,
-                child: Text(
-                  label,
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                    color: ThemeConfig.textColor,
-                  ),
+        body: ListView(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+          children: <Widget>[
+            _buildBasicSection(),
+            const SizedBox(height: ThemeConfig.space12),
+            _buildOptionalSection(),
+            const SizedBox(height: ThemeConfig.space8),
+          ],
+        ),
+        bottomNavigationBar: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              ThemeConfig.space16,
+              ThemeConfig.space4,
+              ThemeConfig.space16,
+              ThemeConfig.space8,
+            ),
+            child: FilledButton(
+              onPressed: _save,
+              style: FilledButton.styleFrom(
+                backgroundColor: ThemeConfig.primaryColor,
+                foregroundColor: const Color(0xFF0B1220),
+                minimumSize: const Size.fromHeight(48),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(ThemeConfig.radiusMd),
+                ),
+              ),
+              child: Text(
+                isEditing ? '保存修改' : '保存',
+                style: const TextStyle(
+                  fontSize: ThemeConfig.fontSizeSubtitle,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ),
           ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: SizedBox(
-              height: controlHeight ?? (help == null ? 40 : null),
-              child: control,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBasicSection() {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            '基本信息',
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                  color: ThemeConfig.textColor,
+                ),
+          ),
+          const SizedBox(height: ThemeConfig.space12),
+          FormFieldRow(
+            label: '账号名',
+            child: TextField(
+              controller: _titleController,
+              style: const TextStyle(color: ThemeConfig.textColor),
+              decoration: const InputDecoration(
+                hintText: '如：GitHub/微信',
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+              ),
             ),
           ),
+          FormFieldRow(
+            label: '用户名',
+            child: TextField(
+              controller: _usernameController,
+              style: const TextStyle(color: ThemeConfig.textColor),
+              decoration: const InputDecoration(
+                hintText: '如：name@example.com',
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+              ),
+            ),
+          ),
+          _buildPasswordField(),
         ],
       ),
     );
   }
 
-  // 密码强度条与提示
-  Widget _buildPasswordStrength(String password) {
-    if (password.isEmpty) {
-      return Text(
-        '请输入密码',
-        style: TextStyle(
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-          fontSize: 12,
-        ),
-      );
-    }
-
-    int score = 0;
-    if (password.length >= 8) score++;
-    if (password.contains(RegExp(r'[a-z]'))) score++;
-    if (password.contains(RegExp(r'[A-Z]'))) score++;
-    if (password.contains(RegExp(r'[0-9]'))) score++;
-    if (password.contains(RegExp(r'[!@#\$%^&*(),.?":{}|<>]'))) score++;
-
-    Color color;
-    String label;
-    switch (score) {
-      case 0:
-      case 1:
-        color = Colors.red;
-        label = '弱';
-        break;
-      case 2:
-        color = Colors.orange;
-        label = '一般';
-        break;
-      case 3:
-        color = Colors.yellow.shade700;
-        label = '中等';
-        break;
-      case 4:
-        color = Colors.lightGreen;
-        label = '强';
-        break;
-      default:
-        color = Colors.green;
-        label = '很强';
-    }
-
+  Widget _buildPasswordField() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: LinearProgressIndicator(
-            minHeight: 4,
-            value: score / 5,
-            backgroundColor: Colors.grey.shade200,
-            valueColor: AlwaysStoppedAnimation<Color>(color),
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          '密码强度：$label',
-          style: TextStyle(
-            color: color,
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
-    );
-  }
-
-  // 自定义“密码”行：首行与输入框垂直居中，强度条另起一行缩进对齐
-  Widget _buildPasswordItem() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: <Widget>[
-              SizedBox(
-                width: 72,
-                height: 40,
-                child: Center(
-                  child: Text(
-                    '密码',
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: ThemeConfig.textColor,
-                    ),
-                  ),
-                ),
+        FormFieldRow(
+          label: '密码',
+          child: TextField(
+            controller: _passwordController,
+            obscureText: _obscure,
+            onChanged: (_) => setState(() {}),
+            style: const TextStyle(color: ThemeConfig.textColor),
+            decoration: InputDecoration(
+              hintText: '输入密码',
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: SizedBox(
-                  height: 40,
-                  child: TextField(
-                    controller: _passwordController,
-                    obscureText: _obscure,
-                    onChanged: (_) => setState(() {}),
-                    style: const TextStyle(color: ThemeConfig.textColor),
-                    decoration: InputDecoration(
-                      hintText: '输入密码',
-                      hintStyle: const TextStyle(
-                        color: ThemeConfig.hintTextColor,
-                      ),
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                        borderSide: const BorderSide(
-                          color: ThemeConfig.inputBorderColor,
-                        ),
-                      ),
-                      suffixIcon: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: <Widget>[
-                          IconButton(
-                            onPressed: _showPasswordGenerator,
-                            icon: const Icon(Icons.auto_fix_high),
-                            color: ThemeConfig.textColor,
-                            tooltip: '生成密码',
-                          ),
-                          IconButton(
-                            onPressed: () =>
-                                setState(() => _obscure = !_obscure),
-                            icon: Icon(
-                              _obscure
-                                  ? Icons.visibility
-                                  : Icons.visibility_off,
-                            ),
-                            color: ThemeConfig.textColor,
-                            tooltip: _obscure ? '显示密码' : '隐藏密码',
-                          ),
-                        ],
-                      ),
-                    ),
+              suffixIcon: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  IconButton(
+                    onPressed: _showPasswordGenerator,
+                    icon: const Icon(Icons.auto_fix_high),
+                    tooltip: '生成密码',
                   ),
-                ),
+                  PasswordVisibilityToggle(
+                    obscured: _obscure,
+                    onToggle: () => setState(() => _obscure = !_obscure),
+                    iconSize: 22,
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
         Padding(
           padding: const EdgeInsets.only(left: 72 + 8),
-          child: _buildPasswordStrength(_passwordController.text),
+          child: StrengthIndicator(password: _passwordController.text),
         ),
       ],
     );
   }
 
-  // 可选信息折叠卡片
   Widget _buildOptionalSection() {
-    return Card(
-      color: ThemeConfig.fillColor,
+    return AppCard(
       child: Theme(
         data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
         child: ExpansionTile(
@@ -533,8 +467,9 @@ class _EditItemScreenState extends State<EditItemScreen> {
             _saveOptionalExpanded(v);
           },
           collapsedIconColor: ThemeConfig.textColor,
-          tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
-          childrenPadding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          iconColor: ThemeConfig.textColor,
+          tilePadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+          childrenPadding: const EdgeInsets.only(top: ThemeConfig.space8),
           title: const Text(
             '可选信息',
             style: TextStyle(
@@ -543,10 +478,11 @@ class _EditItemScreenState extends State<EditItemScreen> {
             ),
           ),
           children: <Widget>[
-            _buildFormItem(
+            FormFieldRow(
               label: '网址',
-              control: TextField(
+              child: TextField(
                 controller: _urlController,
+                style: const TextStyle(color: ThemeConfig.textColor),
                 decoration: const InputDecoration(
                   hintText: 'https://example.com',
                   isDense: true,
@@ -557,11 +493,10 @@ class _EditItemScreenState extends State<EditItemScreen> {
                 ),
               ),
             ),
-            _buildFormItem(
+            FormFieldRow(
               label: '备注',
               alignWithField: true,
-              controlHeight: 120,
-              control: TextField(
+              child: TextField(
                 controller: _notesController,
                 keyboardType: TextInputType.multiline,
                 textInputAction: TextInputAction.newline,
@@ -577,17 +512,19 @@ class _EditItemScreenState extends State<EditItemScreen> {
                     horizontal: 12,
                     vertical: 12,
                   ),
-                  border: OutlineInputBorder(),
                 ),
               ),
             ),
-            _buildFormItem(
-              label: '常用',
-              control: Align(
+            FormFieldRow(
+              label: '收藏',
+              child: Align(
                 alignment: Alignment.centerLeft,
                 child: Switch(
                   value: _isFavorite,
-                  onChanged: (bool v) => setState(() => _isFavorite = v),
+                  onChanged: (bool v) => setState(() {
+                    _isFavorite = v;
+                    _dirty = true;
+                  }),
                 ),
               ),
             ),

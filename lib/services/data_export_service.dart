@@ -47,6 +47,31 @@ class DataExportService {
     return DataExportResult(path: filePath, itemCount: items.length);
   }
 
+  /// 从 JSON 文件导入密码条目。
+  ///
+  /// 兼容两种格式：
+  /// - 标准导出格式 `{app, items: [...]}`（见 exportJson）
+  /// - 纯数组格式 `[...]`（直接是条目列表）
+  /// 返回解析出的 [PasswordItem] 列表，合并/去重由调用方决定。
+  Future<List<PasswordItem>> importJson(String filePath) async {
+    final String raw = await File(filePath).readAsString();
+    final dynamic decoded = jsonDecode(raw);
+
+    List<dynamic> rawItems;
+    if (decoded is Map<String, dynamic> && decoded['items'] is List) {
+      rawItems = decoded['items'] as List;
+    } else if (decoded is List) {
+      rawItems = decoded;
+    } else {
+      throw const FormatException('无法识别的导入文件格式');
+    }
+
+    return rawItems
+        .whereType<Map>()
+        .map((Map m) => PasswordItem.fromMap(m))
+        .toList();
+  }
+
   Future<Directory> _resolveExportDirectory() async {
     final Directory? downloads = await getDownloadsDirectory();
     if (downloads != null) {

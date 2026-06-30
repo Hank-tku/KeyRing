@@ -1,11 +1,15 @@
-// passcode_screen.dart
 import 'package:flutter/material.dart';
-import 'auth_service.dart'; // 导入您的认证服务
 
+import '../utils/theme_config.dart';
+import 'auth_service.dart';
+
+/// 系统密码验证页（委托 OS local_auth，biometricOnly=false）。
+///
+/// 应用内仅展示验证状态与重试入口；真正的密码输入由系统弹窗完成。
 class PasscodeScreen extends StatefulWidget {
-  final VoidCallback onCorrect;
-
   const PasscodeScreen({super.key, required this.onCorrect});
+
+  final VoidCallback onCorrect;
 
   @override
   State<PasscodeScreen> createState() => _PasscodeScreenState();
@@ -16,36 +20,30 @@ class _PasscodeScreenState extends State<PasscodeScreen> {
   bool _isVerifying = false;
 
   Future<void> _verifySystemPassword() async {
-    setState(() {
-      _isVerifying = true;
-    });
-
+    setState(() => _isVerifying = true);
     try {
-      // 调用系统密码验证（注意：这里设置 biometricOnly: false 允许使用设备密码）
-      final bool authenticated = await _authService
-          .authenticateWithSystemPassword();
-
+      final bool authenticated =
+          await _authService.authenticateWithSystemPassword();
       if (!mounted) return;
       if (authenticated) {
-        // 验证成功，先关闭当前页面，再回调
         Navigator.of(context).pop();
         widget.onCorrect();
       } else {
-        // 验证失败
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('密码验证失败，请重试')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('验证失败，请重试'),
+            backgroundColor: ThemeConfig.dangerColor,
+          ),
+        );
       }
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('验证出错: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('验证出错: $e')),
+      );
     } finally {
       if (mounted) {
-        setState(() {
-          _isVerifying = false;
-        });
+        setState(() => _isVerifying = false);
       }
     }
   }
@@ -53,7 +51,7 @@ class _PasscodeScreenState extends State<PasscodeScreen> {
   @override
   void initState() {
     super.initState();
-    // 页面打开后自动触发系统密码验证
+    // 页面打开后自动触发系统密码验证。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _verifySystemPassword();
     });
@@ -64,30 +62,99 @@ class _PasscodeScreenState extends State<PasscodeScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('系统密码验证'),
+        titleTextStyle: const TextStyle(
+          color: ThemeConfig.primaryColor,
+          fontSize: ThemeConfig.fontSizeTitle,
+          fontWeight: FontWeight.w500,
+        ),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () => Navigator.of(context).pop(),
         ),
       ),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (_isVerifying) ...[
-              const CircularProgressIndicator(),
-              const SizedBox(height: 20),
-              const Text('等待系统密码验证...'),
-            ] else ...[
-              const Icon(Icons.lock, size: 64),
-              const SizedBox(height: 20),
-              const Text('需要验证系统密码'),
-              const SizedBox(height: 20),
-              ElevatedButton(
-                onPressed: _verifySystemPassword,
-                child: const Text('重新验证系统密码'),
-              ),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: <Color>[
+              ThemeConfig.mainBgColor,
+              Color(0xFF0B0D12),
             ],
-          ],
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: <Widget>[
+                Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    color: ThemeConfig.primarySoft,
+                    borderRadius: BorderRadius.circular(ThemeConfig.space20),
+                    border: Border.all(
+                      color: ThemeConfig.primaryColor.withValues(alpha: 0.3),
+                    ),
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(
+                    _isVerifying
+                        ? Icons.lock_clock_outlined
+                        : Icons.lock_outline,
+                    color: ThemeConfig.primaryColor,
+                    size: 38,
+                  ),
+                ),
+                const SizedBox(height: ThemeConfig.space20),
+                if (_isVerifying) ...<Widget>[
+                  const SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2.5),
+                  ),
+                  const SizedBox(height: ThemeConfig.space12),
+                  const Text(
+                    '正在验证...',
+                    style: TextStyle(color: ThemeConfig.secondaryTextColor),
+                  ),
+                ] else ...<Widget>[
+                  const Text(
+                    '需要验证系统密码',
+                    style: TextStyle(
+                      color: ThemeConfig.textColor,
+                      fontSize: ThemeConfig.fontSizeSubtitle,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: ThemeConfig.space8),
+                  const Text(
+                    '验证失败或取消时，可点此重新验证',
+                    style: TextStyle(color: ThemeConfig.secondaryTextColor),
+                  ),
+                  const SizedBox(height: ThemeConfig.space20),
+                  FilledButton.icon(
+                    onPressed: _verifySystemPassword,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('重新验证'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: ThemeConfig.primaryColor,
+                      foregroundColor: const Color(0xFF0B0D12),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: ThemeConfig.space24,
+                        vertical: ThemeConfig.space12,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius:
+                            BorderRadius.circular(ThemeConfig.radiusMd),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
       ),
     );

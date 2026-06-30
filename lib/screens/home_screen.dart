@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:file_picker/file_picker.dart';
 import 'dart:async';
 
 import 'detail_screen.dart';
@@ -9,10 +10,13 @@ import '../services/data_export_service.dart';
 import '../services/password_repository.dart';
 import '../services/lan_sync_service.dart';
 import '../utils/theme_config.dart';
+import '../widgets/shared/app_card.dart';
+import '../widgets/shared/copy_button.dart';
 import 'package:flutter/foundation.dart';
 import 'lock_screen.dart';
 
 enum SyncState { idle, syncing, success, error, stopped }
+
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, required this.repository});
@@ -32,6 +36,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   LanSyncService? _lan;
   final DataExportService _dataExportService = DataExportService();
   bool _exporting = false;
+
+  // 筛选状态
+  bool _onlyFavorites = false;
 
   // 同步状态
   SyncState _syncState = SyncState.idle;
@@ -121,16 +128,41 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  void _copy(String text, String label) {
-    Clipboard.setData(ClipboardData(text: text));
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('已复制$label'),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        ),
-      );
+  /// 按搜索词 + 收藏筛选。返回过滤后（未排序）的列表。
+  List<PasswordItem> _applyFilters(List<PasswordItem> source) {
+    return source.where((PasswordItem item) {
+      if (_onlyFavorites && !item.isFavorite) return false;
+      if (_query.isEmpty) return true;
+      final String q = _query.toLowerCase();
+      return item.title.toLowerCase().contains(q) ||
+          item.username.toLowerCase().contains(q) ||
+          (item.url ?? '').toLowerCase().contains(q) ||
+          (item.notes ?? '').toLowerCase().contains(q);
+    }).toList();
+  }
+
+  /// 对已过滤列表排序：默认按修改时间倒序（最近改的在前），收藏置顶。
+  List<PasswordItem> _applySort(List<PasswordItem> items) {
+    final List<PasswordItem> copy = List<PasswordItem>.of(items);
+    copy.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    // 收藏项始终置顶
+    copy.sort((a, b) {
+      final int fav = (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0);
+      return fav;
+    });
+    return copy;
+  }
+
+  /// 切换收藏状态。
+  Future<void> _toggleFavorite(PasswordItem item) async {
+    try {
+      final PasswordItem updated =
+          item.copyWith(isFavorite: !item.isFavorite);
+      await widget.repository.updateItem(updated);
+    } catch (e) {
+      if (mounted) {
+        _showSnackBar('操作失败: $e', ThemeConfig.dangerColor);
+      }
     }
   }
 
@@ -157,18 +189,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       MaterialPageRoute<bool>(
         builder: (BuildContext context) =>
             DetailScreen(item: item, repository: widget.repository),
-      ),
-    );
-    if (changed == true && mounted) {
-      setState(() {});
-    }
-  }
-
-  Future<void> _edit(PasswordItem item) async {
-    final bool? changed = await Navigator.of(context).push<bool>(
-      MaterialPageRoute<bool>(
-        builder: (BuildContext context) =>
-            EditItemScreen(repository: widget.repository, initial: item),
       ),
     );
     if (changed == true && mounted) {
@@ -295,15 +315,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 Container(
                                   padding: const EdgeInsets.symmetric(
                                     vertical: 20,
-                                    horizontal: 32,
+                                    horizontal: 24,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: const Color(
-                                      0xFF2DD4BF,
-                                    ).withValues(alpha: 0.1),
-                                    borderRadius: BorderRadius.circular(16),
+                                    color: ThemeConfig.primarySoft,
+                                    borderRadius: BorderRadius.circular(ThemeConfig.radiusCard),
                                     border: Border.all(
-                                      color: const Color(0xFF2DD4BF),
+                                      color: ThemeConfig.primaryColor.withValues(alpha: 0.4),
                                       width: 2,
                                     ),
                                   ),
@@ -312,18 +330,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                     style: const TextStyle(
                                       fontSize: 28,
                                       fontWeight: FontWeight.bold,
-                                      color: Color(0xFF2DD4BF),
-                                      letterSpacing: 10,
+                                      color: ThemeConfig.primaryColor,
+                                      letterSpacing: 8,
                                       fontFamily: 'monospace',
                                     ),
                                   ),
                                 ),
                                 const SizedBox(height: 16),
-                                const Text(
+                                Text(
                                   '等待对方输入验证码...',
                                   style: TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.grey,
+                                    fontSize: ThemeConfig.fontSizeBody,
+                                    color: ThemeConfig.secondaryTextColor,
                                   ),
                                   textAlign: TextAlign.center,
                                 ),
@@ -390,14 +408,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   TextEditingController();
 
               try {
-                await Future.delayed(const Duration(milliseconds: 1000));
+                // 让出当前帧再弹窗，避免阻塞 UI 线程。
+                // 原来的 Future.delayed(1000ms) 是"用睡眠等连接就绪"，
+                // 导致客户端验证码弹窗总是慢 1 秒。
+                if (!mounted) {
+                  onCodeEntered('');
+                  return;
+                }
+                final NavigatorState rootNav =
+                    Navigator.of(context, rootNavigator: true);
+                await WidgetsBinding.instance.endOfFrame;
                 if (!mounted) {
                   onCodeEntered('');
                   return;
                 }
 
                 final String? inputCode = await showDialog<String>(
-                  context: context,
+                  context: rootNav.context,
                   barrierDismissible: false,
                   useRootNavigator: true, // Force use of root navigator
                   builder: (BuildContext context) {
@@ -424,36 +451,47 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               textAlign: TextAlign.center,
                               maxLength: 6,
                               style: const TextStyle(
-                                fontSize: 32,
+                                fontSize: 24,
                                 fontWeight: FontWeight.bold,
-                                letterSpacing: 12,
+                                letterSpacing: 6,
+                                color: ThemeConfig.textColor,
                               ),
                               decoration: InputDecoration(
                                 hintText: '000000',
                                 counterText: '',
                                 filled: true,
-                                fillColor: Colors.grey[100],
+                                fillColor: ThemeConfig.fillColor,
+                                hintStyle: const TextStyle(
+                                  color: ThemeConfig.hintTextColor,
+                                  letterSpacing: 6,
+                                ),
                                 border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide(
-                                    color: Colors.grey[300]!,
+                                  borderRadius: BorderRadius.circular(ThemeConfig.radiusMd),
+                                  borderSide: const BorderSide(
+                                    color: ThemeConfig.dividerColor,
+                                  ),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(ThemeConfig.radiusMd),
+                                  borderSide: const BorderSide(
+                                    color: ThemeConfig.dividerColor,
                                   ),
                                 ),
                                 focusedBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: const BorderSide(
-                                    color: Color(0xFF2DD4BF),
+                                  borderRadius: BorderRadius.circular(ThemeConfig.radiusMd),
+                                  borderSide: BorderSide(
+                                    color: ThemeConfig.primaryColor,
                                     width: 2,
                                   ),
                                 ),
                               ),
                             ),
                             const SizedBox(height: 12),
-                            const Text(
+                            Text(
                               '输入验证码后点击确认',
                               style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey,
+                                fontSize: ThemeConfig.fontSizeCaption,
+                                color: ThemeConfig.secondaryTextColor,
                               ),
                               textAlign: TextAlign.center,
                             ),
@@ -468,28 +506,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             _stopSync();
                           },
                           style: TextButton.styleFrom(
-                            foregroundColor: Colors.red,
+                            foregroundColor: ThemeConfig.dangerColor,
                           ),
                           child: const Text('取消'),
                         ),
                         TextButton(
                           onPressed: () {
                             final String code = codeController.text.trim();
-                            debugPrint('User entered code: $code');
                             if (code.isEmpty) {
                               ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('请输入验证码'),
-                                  backgroundColor: Colors.orange,
+                                SnackBar(
+                                  content: const Text('请输入验证码'),
+                                  backgroundColor: ThemeConfig.warningColor,
                                 ),
                               );
                               return;
                             }
                             if (code.length != 6) {
                               ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('验证码必须是6位数字'),
-                                  backgroundColor: Colors.orange,
+                                SnackBar(
+                                  content: const Text('验证码必须是6位数字'),
+                                  backgroundColor: ThemeConfig.warningColor,
                                 ),
                               );
                               return;
@@ -498,7 +535,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             Navigator.of(context).pop(code);
                           },
                           style: TextButton.styleFrom(
-                            foregroundColor: const Color(0xFF2DD4BF),
+                            foregroundColor: ThemeConfig.primaryColor,
                           ),
                           child: const Text('确认'),
                         ),
@@ -595,6 +632,146 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// 导入 JSON 文件并合并到当前保险库。
+  /// 先展示格式说明，用户确认后选择文件，再按 newer-wins 合并。
+  Future<void> _importData() async {
+    // 第一步：展示导入格式说明（含 JSON 示例 + 字段解释）。
+    final bool? wantPick = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: const Text('导入数据'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const Text(
+                '从 KeyRing 导出的 JSON 文件导入密码条目。支持两种格式：',
+                style: TextStyle(fontSize: ThemeConfig.fontSizeBody),
+              ),
+              const SizedBox(height: ThemeConfig.space12),
+              const Text(
+                '合并规则',
+                style: TextStyle(
+                  fontSize: ThemeConfig.fontSizeBody,
+                  fontWeight: FontWeight.w600,
+                  color: ThemeConfig.primaryColor,
+                ),
+              ),
+              const SizedBox(height: ThemeConfig.space4),
+              Text(
+                '• 相同账号（按 ID 匹配）：以较新的修改时间为准\n'
+                '• 新账号：作为新增添加\n'
+                '• 更旧的条目：自动跳过',
+                style: const TextStyle(
+                  fontSize: ThemeConfig.fontSizeCaption,
+                  color: ThemeConfig.secondaryTextColor,
+                  height: 1.6,
+                ),
+              ),
+              const SizedBox(height: ThemeConfig.space12),
+              const Text(
+                '文件示例',
+                style: TextStyle(
+                  fontSize: ThemeConfig.fontSizeBody,
+                  fontWeight: FontWeight.w600,
+                  color: ThemeConfig.primaryColor,
+                ),
+              ),
+              const SizedBox(height: ThemeConfig.space4),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(ThemeConfig.space12),
+                decoration: BoxDecoration(
+                  color: ThemeConfig.mainBgColor,
+                  borderRadius: BorderRadius.circular(ThemeConfig.radiusSm),
+                  border: Border.all(color: ThemeConfig.dividerColor),
+                ),
+                child: SelectableText(
+                  '{\n'
+                  '  "app": "KeyRing",\n'
+                  '  "items": [\n'
+                  '    {\n'
+                  '      "id": "唯一标识",\n'
+                  '      "title": "GitHub",\n'
+                  '      "username": "name@xx.com",\n'
+                  '      "password": "你的密码",\n'
+                  '      "url": "https://github.com",\n'
+                  '      "notes": "备注（可选）",\n'
+                  '      "isFavorite": 0\n'
+                  '    }\n'
+                  '  ]\n'
+                  '}',
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 11,
+                    height: 1.5,
+                    color: ThemeConfig.secondaryTextColor,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.folder_open_outlined, size: 18),
+            label: const Text('选择文件'),
+          ),
+        ],
+      ),
+    );
+    if (wantPick != true || !mounted) return;
+
+    // 第二步：选择 JSON 文件。
+    final FilePickerResult? picked = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: <String>['json'],
+      withData: false,
+    );
+    if (picked == null || picked.files.single.path == null) return;
+    if (!mounted) return;
+
+    final String filePath = picked.files.single.path!;
+
+    try {
+      final List<PasswordItem> incoming =
+          await _dataExportService.importJson(filePath);
+      final Map<String, PasswordItem> existing = <String, PasswordItem>{
+        for (final PasswordItem it in widget.repository.itemsNotifier.value)
+          it.id: it,
+      };
+
+      int added = 0;
+      int updated = 0;
+      for (final PasswordItem item in incoming) {
+        final PasswordItem? local = existing[item.id];
+        if (local == null) {
+          await widget.repository.addItem(item);
+          added++;
+        } else if (item.updatedAt.isAfter(local.updatedAt)) {
+          // newer-wins：导入项更新则覆盖
+          await widget.repository.updateItem(item);
+          updated++;
+        }
+        // 导入项更旧则跳过
+      }
+      if (!mounted) return;
+      _showSnackBar(
+        '导入完成：新增 $added 条，更新 $updated 条',
+        ThemeConfig.successColor,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _showSnackBar('导入失败: $e', ThemeConfig.dangerColor);
+    }
+  }
+
   void _showSnackBar(String message, Color backgroundColor) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -609,70 +786,73 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final List<PasswordItem> filtered = _items.where((PasswordItem item) {
-      if (_query.isEmpty) return true;
-      final String q = _query.toLowerCase();
-      return item.title.toLowerCase().contains(q) ||
-          item.username.toLowerCase().contains(q) ||
-          (item.url ?? '').toLowerCase().contains(q) ||
-          (item.notes ?? '').toLowerCase().contains(q);
-    }).toList();
+    final List<PasswordItem> filtered = _applyFilters(_items);
+    final List<PasswordItem> sorted = _applySort(filtered);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('KeyRing', textAlign: TextAlign.left),
+        title: const Text('KeyRing'),
         titleTextStyle: const TextStyle(
-          color: Color(0xFF2DD4BF),
-          fontSize: 22,
+          color: ThemeConfig.primaryColor,
+          fontSize: ThemeConfig.fontSizeTitle,
           fontWeight: FontWeight.w500,
         ),
         actions: <Widget>[
           IconButton(
-            onPressed: _exporting ? null : _exportData,
-            icon: _exporting
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.download, color: Color(0xFF94A3B8)),
-            tooltip: '导出数据',
-          ),
-          IconButton(
             onPressed: _syncState == SyncState.syncing ? _stopSync : _sync,
-            icon: () {
-              switch (_syncState) {
-                case SyncState.syncing:
-                  return const Icon(Icons.stop_circle, color: Colors.orange);
-                case SyncState.success:
-                  return const Icon(Icons.check_circle, color: Colors.green);
-                case SyncState.error:
-                  return const Icon(Icons.error, color: Colors.red);
-                case SyncState.stopped:
-                  return const Icon(Icons.sync, color: Colors.orange);
-                case SyncState.idle:
-                  return const Icon(Icons.sync, color: Color(0xFF94A3B8));
+            icon: _buildSyncIcon(),
+            color: _buildSyncIconColor(),
+            tooltip: _buildSyncTooltip(),
+          ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            tooltip: '更多',
+            onSelected: (String value) {
+              switch (value) {
+                case 'lock':
+                  _showLockScreen();
+                  break;
+                case 'export':
+                  _exportData();
+                  break;
+                case 'import':
+                  _importData();
+                  break;
               }
-            }(),
-            tooltip: () {
-              switch (_syncState) {
-                case SyncState.syncing:
-                  return '停止同步';
-                case SyncState.success:
-                  return '同步成功，点击重新同步';
-                case SyncState.error:
-                  return '同步失败，点击重新同步';
-                case SyncState.stopped:
-                  return '同步已停止，点击重新同步';
-                case SyncState.idle:
-                  return '局域网同步';
-              }
-            }(),
+            },
+            itemBuilder: (BuildContext context) =>
+                <PopupMenuEntry<String>>[
+              const PopupMenuItem<String>(
+                value: 'lock',
+                child: ListTile(
+                  leading: Icon(Icons.lock_outline),
+                  title: Text('立即锁定'),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                ),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem<String>(
+                value: 'import',
+                child: ListTile(
+                  leading: Icon(Icons.upload_outlined),
+                  title: Text('导入数据'),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                ),
+              ),
+              const PopupMenuItem<String>(
+                value: 'export',
+                child: ListTile(
+                  leading: Icon(Icons.download_outlined),
+                  title: Text('导出数据'),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                ),
+              ),
+            ],
           ),
         ],
-        flexibleSpace: Container(
-          decoration: const BoxDecoration(color: Color(0xFF121A2E)),
-        ),
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(60),
           child: Padding(
@@ -684,7 +864,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               decoration: InputDecoration(
                 hintText: '搜索账号名/用户名/网址/备注',
                 prefixIcon: const Icon(Icons.search),
-                hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
+                hintStyle: const TextStyle(color: ThemeConfig.hintTextColor),
                 suffixIcon: _query.isNotEmpty
                     ? IconButton(
                         icon: const Icon(Icons.clear),
@@ -696,15 +876,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     : null,
                 filled: true,
                 enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(20),
+                  borderRadius: BorderRadius.circular(ThemeConfig.radiusMd),
                   borderSide: const BorderSide(
                     color: ThemeConfig.inputBorderColor,
                   ),
                 ),
                 focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(20),
+                  borderRadius: BorderRadius.circular(ThemeConfig.radiusMd),
                   borderSide: const BorderSide(
-                    color: ThemeConfig.inputBorderColor,
+                    color: ThemeConfig.primaryColor,
                   ),
                 ),
                 contentPadding: const EdgeInsets.symmetric(
@@ -718,53 +898,127 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       ),
       body: Column(
         children: <Widget>[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
-            child: Row(
-              children: <Widget>[
-                FilledButton.tonalIcon(
-                  onPressed: _add,
-                  icon: const Icon(Icons.add, size: 20),
-                  label: const Text('新增'),
-                  style: ButtonStyle(
-                    backgroundColor: const WidgetStatePropertyAll(
-                      ThemeConfig.primaryColor,
-                    ),
-                    padding: const WidgetStatePropertyAll<EdgeInsets>(
-                      EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                    ),
-                    shape: WidgetStatePropertyAll<OutlinedBorder>(
-                      RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                  ),
-                ),
-                const Spacer(),
-                Text(
-                  '共 ${filtered.length} 项',
-                  style: const TextStyle(color: ThemeConfig.textColor),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 2),
+          // 筛选与排序工具栏
+          _buildToolbar(sorted.length),
           Expanded(
-            child: filtered.isEmpty
+            child: sorted.isEmpty
                 ? _buildEmptyState()
                 : ListView.separated(
-                    padding: const EdgeInsets.all(12),
-                    itemCount: filtered.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 10),
+                    padding: const EdgeInsets.fromLTRB(
+                      12,
+                      4,
+                      12,
+                      80,
+                    ), // 底部留白避开 FAB
+                    itemCount: sorted.length,
+                    separatorBuilder: (_, __) =>
+                        const SizedBox(height: ThemeConfig.space8),
                     itemBuilder: (BuildContext context, int index) {
-                      final PasswordItem item = filtered[index];
+                      final PasswordItem item = sorted[index];
                       return _buildPasswordCard(item);
                     },
                   ),
           ),
         ],
       ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _add,
+        icon: const Icon(Icons.add),
+        label: const Text('新增'),
+        tooltip: '新增密码',
+      ),
     );
+  }
+
+  /// 构建筛选工具栏（仅收藏筛选 + 计数）。
+  /// 列表默认按修改时间倒序，不再提供排序切换。
+  Widget _buildToolbar(int count) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: Row(
+        children: <Widget>[
+          FilterChip(
+            label: const Text('收藏'),
+            selected: _onlyFavorites,
+            onSelected: (bool v) => setState(() => _onlyFavorites = v),
+            selectedColor: ThemeConfig.primarySoft,
+            checkmarkColor: ThemeConfig.primaryColor,
+            labelStyle: TextStyle(
+              color: _onlyFavorites
+                  ? ThemeConfig.primaryColor
+                  : ThemeConfig.secondaryTextColor,
+            ),
+            side: BorderSide(
+              color: _onlyFavorites
+                  ? ThemeConfig.primaryColor.withValues(alpha: 0.4)
+                  : ThemeConfig.inputBorderColor,
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(ThemeConfig.radiusPill),
+            ),
+            showCheckmark: false,
+            avatar: Icon(
+              _onlyFavorites ? Icons.bookmark : Icons.bookmark_border,
+              size: 18,
+              color: _onlyFavorites
+                  ? ThemeConfig.favoriteColor
+                  : ThemeConfig.secondaryTextColor,
+            ),
+          ),
+          const Spacer(),
+          Text(
+            '共 $count 项',
+            style: const TextStyle(
+              color: ThemeConfig.hintTextColor,
+              fontSize: ThemeConfig.fontSizeCaption,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Icon _buildSyncIcon() {
+    switch (_syncState) {
+      case SyncState.syncing:
+        return const Icon(Icons.stop_circle_outlined);
+      case SyncState.success:
+        return const Icon(Icons.check_circle_outlined);
+      case SyncState.error:
+        return const Icon(Icons.error_outline);
+      case SyncState.stopped:
+      case SyncState.idle:
+        return const Icon(Icons.sync);
+    }
+  }
+
+  Color _buildSyncIconColor() {
+    switch (_syncState) {
+      case SyncState.syncing:
+      case SyncState.stopped:
+        return ThemeConfig.warningColor;
+      case SyncState.success:
+        return ThemeConfig.successColor;
+      case SyncState.error:
+        return ThemeConfig.dangerColor;
+      case SyncState.idle:
+        return ThemeConfig.secondaryTextColor;
+    }
+  }
+
+  String _buildSyncTooltip() {
+    switch (_syncState) {
+      case SyncState.syncing:
+        return '停止同步';
+      case SyncState.success:
+        return '同步成功，点击重新同步';
+      case SyncState.error:
+        return '同步失败，点击重新同步';
+      case SyncState.stopped:
+        return '同步已停止，点击重新同步';
+      case SyncState.idle:
+        return '局域网同步';
+    }
   }
 
   Widget _buildEmptyState() {
@@ -773,20 +1027,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
-            Icon(Icons.search_off, size: 64, color: Colors.grey.shade400),
-            const SizedBox(height: 16),
+            const Icon(
+              Icons.search_off,
+              size: 64,
+              color: ThemeConfig.secondaryTextColor,
+            ),
+            const SizedBox(height: ThemeConfig.space16),
             Text(
               '没有找到匹配的结果',
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(color: Colors.grey.shade600),
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: ThemeConfig.hintTextColor,
+                  ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: ThemeConfig.space8),
             Text(
               '尝试使用不同的关键词搜索',
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: Colors.grey.shade500),
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: ThemeConfig.hintTextColor,
+                  ),
             ),
           ],
         ),
@@ -797,21 +1055,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: <Widget>[
-          Icon(Icons.lock_outline, size: 64, color: Colors.grey.shade400),
-          const SizedBox(height: 16),
+          const Icon(
+            Icons.lock_outline,
+            size: 64,
+            color: ThemeConfig.secondaryTextColor,
+          ),
+          const SizedBox(height: ThemeConfig.space16),
           Text(
             '暂未记录密码',
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(color: Colors.grey.shade600),
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: ThemeConfig.hintTextColor,
+                ),
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: ThemeConfig.space8),
           Text(
-            '点击新增按钮，添加第一个密码记录',
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(color: Colors.grey.shade500),
+            '点击右下角按钮，添加第一个密码记录',
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: ThemeConfig.hintTextColor,
+                ),
             textAlign: TextAlign.center,
           ),
         ],
@@ -820,153 +1082,192 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildPasswordCard(PasswordItem item) {
-    return GestureDetector(
-      onTap: () => _viewDetail(item),
-      onLongPress: () => _delete(item),
-      child: Container(
-        height: 108,
+    final bool revealed = _visibleItemId == item.id;
+
+    // 用 Dismissible 包裹卡片，左滑露出删除。
+    return Dismissible(
+      key: ValueKey<String>(item.id),
+      direction: DismissDirection.endToStart,
+      confirmDismiss: (_) async {
+        await _delete(item);
+        return false; // 由 _delete 内部处理实际删除，Dismissible 不自行移除
+      },
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: ThemeConfig.space24),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          color: item.isFavorite
-              ? const Color(0xFFFFE69C)
-              : ThemeConfig.fillColor,
-          boxShadow: [
-            BoxShadow(
-              color: ThemeConfig.fillColor.withValues(alpha: 0.1),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
-            ),
-          ],
+          color: ThemeConfig.dangerColor.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(ThemeConfig.radiusCard),
         ),
-        child: Padding(
-          padding: const EdgeInsets.all(8),
-          child: Row(
-            children: [
-              // 内容区域
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: <Widget>[
-                    Text(
-                      item.title,
+        child: const Icon(
+          Icons.delete_outline,
+          color: ThemeConfig.dangerColor,
+        ),
+      ),
+      child: AppCard(
+        onTap: () => _viewDetail(item),
+        onLongPress: () {
+          // 长按改为触感反馈切收藏，不再直接弹删除框（防误触）。
+          HapticFeedback.mediumImpact();
+          _toggleFavorite(item);
+        },
+        backgroundColor: item.isFavorite
+            ? ThemeConfig.primarySoft
+            : null,
+        borderColor: item.isFavorite
+            ? ThemeConfig.favoriteColor.withValues(alpha: 0.4)
+            : null,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            // 标题行 + 收藏 bookmark
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    item.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: ThemeConfig.textColor,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => _toggleFavorite(item),
+                  icon: Icon(
+                    item.isFavorite
+                        ? Icons.bookmark
+                        : Icons.bookmark_border,
+                    size: 22,
+                    color: item.isFavorite
+                        ? ThemeConfig.favoriteColor
+                        : ThemeConfig.secondaryTextColor,
+                  ),
+                  tooltip: item.isFavorite ? '取消收藏' : '收藏',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 32,
+                    minHeight: 32,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: ThemeConfig.space8),
+            // 用户名行
+            Row(
+              children: <Widget>[
+                Icon(
+                  Icons.person_outline,
+                  size: 16,
+                  color: ThemeConfig.hintTextColor,
+                ),
+                const SizedBox(width: ThemeConfig.space8),
+                Expanded(
+                  child: Text(
+                    item.username.isNotEmpty ? item.username : '无用户名',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: ThemeConfig.textColor,
+                      fontSize: ThemeConfig.fontSizeBody,
+                    ),
+                  ),
+                ),
+                if (item.username.isNotEmpty)
+                  CopyButton(
+                    text: item.username,
+                    label: '用户名',
+                    iconSize: 16,
+                  ),
+              ],
+            ),
+            const SizedBox(height: ThemeConfig.space8),
+            // 密码行：常驻眼睛 + 复制（不用先点眼睛才出现复制）
+            Row(
+              children: <Widget>[
+                Icon(
+                  Icons.lock_outline,
+                  size: 16,
+                  color: ThemeConfig.hintTextColor,
+                ),
+                const SizedBox(width: ThemeConfig.space8),
+                Expanded(
+                  child: Text(
+                    revealed
+                        ? item.password
+                        : '•' * (item.password.length.clamp(6, 12)),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: ThemeConfig.textColor,
+                      fontSize: ThemeConfig.fontSizeBody,
+                      letterSpacing: 2,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => setState(
+                    () => _visibleItemId = revealed ? null : item.id,
+                  ),
+                  icon: Icon(
+                    revealed ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+                    size: 18,
+                    color: ThemeConfig.secondaryTextColor,
+                  ),
+                  tooltip: revealed ? '隐藏密码' : '显示密码',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 32,
+                    minHeight: 32,
+                  ),
+                ),
+                CopyButton(text: item.password, label: '密码', iconSize: 16),
+              ],
+            ),
+            // 网址来源（有 url 时展示）
+            if (item.url != null && item.url!.isNotEmpty) ...<Widget>[
+              const SizedBox(height: ThemeConfig.space8),
+              Row(
+                children: <Widget>[
+                  Icon(
+                    Icons.language,
+                    size: 16,
+                    color: ThemeConfig.hintTextColor,
+                  ),
+                  const SizedBox(width: ThemeConfig.space8),
+                  Expanded(
+                    child: Text(
+                      _hostFromUrl(item.url!),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 24,
-                        fontWeight: FontWeight.w600,
+                        color: ThemeConfig.hintTextColor,
+                        fontSize: ThemeConfig.fontSizeCaption,
                       ),
                     ),
-                    const SizedBox(height: 6),
-
-                    // 用户名行
-                    Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            item.username.isNotEmpty ? item.username : '无用户名',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ),
-                        if (item.username.isNotEmpty)
-                          InkWell(
-                            onTap: () => _copy(item.username, '用户名'),
-                            child: Padding(
-                              padding: const EdgeInsets.only(left: 4),
-                              child: Icon(
-                                Icons.copy,
-                                size: 14,
-                                color: Colors.grey[400],
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-
-                    // 密码行
-                    Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            _visibleItemId == item.id
-                                ? item.password
-                                : '••••••••',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ),
-                        if (_visibleItemId == item.id)
-                          InkWell(
-                            onTap: () => _copy(item.password, '密码'),
-                            child: Padding(
-                              padding: const EdgeInsets.only(left: 4),
-                              child: Icon(
-                                Icons.copy,
-                                size: 14,
-                                color: Colors.grey[400],
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-
-              // 操作按钮区域
-              SizedBox(
-                width: 150,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    _buildMobileIconButton(
-                      Icons.visibility,
-                      _visibleItemId == item.id ? '隐藏' : '显示',
-                      () => setState(
-                        () => _visibleItemId = _visibleItemId == item.id
-                            ? null
-                            : item.id,
-                      ),
-                    ),
-                    _buildMobileIconButton(Icons.edit, '编辑', () => _edit(item)),
-                    _buildMobileIconButton(
-                      Icons.delete,
-                      '删除',
-                      () => _delete(item),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ],
-          ),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildMobileIconButton(
-    IconData icon,
-    String tooltip,
-    VoidCallback onPressed,
-  ) {
-    return IconButton(
-      icon: Icon(icon, size: 28),
-      color: Colors.grey[300],
-      onPressed: onPressed,
-      tooltip: tooltip,
-      padding: const EdgeInsets.all(4),
-      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-    );
+  /// 从 url 中提取 host 用于卡片展示（如 https://github.com/x → github.com）。
+  String _hostFromUrl(String url) {
+    try {
+      final Uri? uri = Uri.tryParse(url);
+      if (uri != null && uri.host.isNotEmpty) {
+        return uri.host;
+      }
+    } catch (_) {
+      // 解析失败，回退到原始字符串
+    }
+    return url;
   }
 }
