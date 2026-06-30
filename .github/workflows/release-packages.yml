@@ -60,6 +60,98 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: build/release/*.zip
 
+  android:
+    name: Android APK (split per ABI)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.41.5
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Android APK (split per ABI)
+        run: flutter build apk --release --split-per-abi
+
+      - name: Package Android
+        run: |
+          mkdir -p build/release
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          for f in build/app/outputs/flutter-apk/*.apk; do
+            base=$(basename "$f" .apk)
+            cp "$f" "build/release/KeyRing-Android-${base}-${TAG}.apk"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KeyRing-Android
+          path: build/release/*.apk
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: build/release/*.apk
+
+  macos:
+    name: macOS app
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.41.5
+          channel: stable
+
+      - name: Enable macOS desktop
+        run: flutter config --enable-macos-desktop
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build macOS
+        run: flutter build macos --release
+
+      - name: Package macOS
+        run: |
+          mkdir -p build/release
+          cd build/macos/Build/Products/Release
+          ditto -c -k --keepParent \
+            "key_ring.app" \
+            "../../../release/KeyRing-macOS-${{ github.event.inputs.tag || github.ref_name }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KeyRing-macOS
+          path: build/release/*.zip
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: build/release/*.zip
+
   ios:
     name: iOS unsigned app
     runs-on: macos-latest
