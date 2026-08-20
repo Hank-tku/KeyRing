@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.1.1+2
+version: 0.1.5+5
 
 environment:
   sdk: ^3.8.1
@@ -58,14 +58,26 @@ dependencies:
   # Utilities
   path_provider: ^2.1.5
 
+  # 导入：二维码扫描 + 截图 OCR
+  mobile_scanner: ^5.2.3
+  # 0.13 与 mobile_scanner 5.x 共用 GoogleMLKit 6.x；0.14 需 MLKit 7 会冲突
+  google_mlkit_text_recognition: ^0.13.0
+
   # launcher
   flutter_launcher_icons: "^0.13.1" # 请确认使用最新版本
   flutter_native_splash: ^2.4.1 # 请确认使用最新稳定版本
+  hotkey_manager: ^0.2.3
+  # hotkey_manager 的传递依赖；直接依赖以复用其物理键→平台键码映射
+  uni_platform: ^0.1.3
+  window_manager: ^0.5.2
+  tray_manager: ^0.5.3
+  desktop_multi_window: ^0.3.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   path_provider_platform_interface: ^2.1.2
+  plugin_platform_interface: ^2.1.8
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
@@ -89,6 +101,7 @@ flutter:
   assets:
     - assets/
     - assets/images/
+    - assets/tray/
 
 flutter_icons:
   image_path: "assets/app_icon.png" # Main app icon

@@ -128,6 +128,44 @@ class PasswordRepository {
     await _reloadItems();
   }
 
+  /// 导入单条条目，保留条目自带的 createdAt/updatedAt。
+  ///
+  /// 与 [addItem]/[updateItem] 不同：导入场景需要以文件/二维码内的原始时间戳
+  /// 为准（用于 newer-wins 合并比较），因此这里**不**覆盖时间戳，直接以
+  /// `ConflictAlgorithm.replace` 按 id 做幂等 upsert。
+  ///
+  /// [batch] 为 true 时跳过 [_reloadItems]，由调用方在批量导入结束后统一刷新，
+  /// 避免逐条刷新带来 N 次全表查询。
+  Future<void> importItem(PasswordItem item, {bool batch = false}) async {
+    await _db!.insert(
+      _table,
+      item.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    if (!batch) {
+      await _reloadItems();
+    }
+  }
+
+  /// 批量导入：在一个事务内逐条 [importItem]（batch=true），结束后统一刷新一次。
+  /// 返回成功写入的条数（已按 id 幂等去重，不区分新增/更新）。
+  Future<int> importItems(Iterable<PasswordItem> items) async {
+    if (items.isEmpty) return 0;
+    int count = 0;
+    await _db!.transaction((Transaction txn) async {
+      for (final PasswordItem item in items) {
+        await txn.insert(
+          _table,
+          item.toMap(),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        count++;
+      }
+    });
+    await _reloadItems();
+    return count;
+  }
+
   Future<String> _resolveDbPath() async {
     final directory = await getApplicationDocumentsDirectory();
     return p.join(directory.path, _dbName);

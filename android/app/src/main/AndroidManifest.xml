@@ -13,6 +13,18 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- 导入：二维码扫描 + 截图 OCR -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Android 13+（API 33）读取图片 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- Android 12 及以下读取图片（maxSdkVersion 32） -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
     <application
         android:label="KeyRing"
         android:name="${applicationName}"
@@ -46,6 +58,20 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- 系统自动填充服务：设置 > 密码和自动填充 > 选择 KeyRing -->
+        <service
+            android:name=".KeyRingAutofillService"
+            android:exported="true"
+            android:label="KeyRing"
+            android:permission="android.permission.BIND_AUTOFILL_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.autofill.AutofillService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.autofill"
+                android:resource="@xml/autofill_service_config" />
+        </service>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

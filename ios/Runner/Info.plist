@@ -26,6 +26,10 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>KeyRing 需要使用相机来扫描二维码以导入密码条目。</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>KeyRing 需要访问相册以选择截图并识别其中的账号密码。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

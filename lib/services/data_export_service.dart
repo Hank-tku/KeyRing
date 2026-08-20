@@ -55,6 +55,14 @@ class DataExportService {
   /// 返回解析出的 [PasswordItem] 列表，合并/去重由调用方决定。
   Future<List<PasswordItem>> importJson(String filePath) async {
     final String raw = await File(filePath).readAsString();
+    return parseJsonItems(raw);
+  }
+
+  /// 解析 JSON 文本为 [PasswordItem] 列表（与 [importJson] 同规则）。
+  ///
+  /// 抽取为静态方法，便于二维码（内容即 JSON 文本）等非文件来源复用，
+  /// 无需先落盘成文件。
+  static List<PasswordItem> parseJsonItems(String raw) {
     final dynamic decoded = jsonDecode(raw);
 
     List<dynamic> rawItems;

@@ -5,10 +5,17 @@ import 'dart:async';
 
 import 'detail_screen.dart';
 import 'edit_item_screen.dart';
+import 'import/import_hub_sheet.dart';
+import 'settings_screen.dart';
 import '../models/password_item.dart';
+import '../services/app_lock_state.dart';
 import '../services/data_export_service.dart';
+import '../services/global_hotkey_service.dart';
+import '../services/import_merger.dart';
 import '../services/password_repository.dart';
 import '../services/lan_sync_service.dart';
+import '../utils/app_shortcuts.dart';
+import '../utils/import_validation.dart';
 import '../utils/theme_config.dart';
 import '../widgets/shared/app_card.dart';
 import '../widgets/shared/copy_button.dart';
@@ -19,9 +26,20 @@ enum SyncState { idle, syncing, success, error, stopped }
 
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.repository});
+  const HomeScreen({
+    super.key,
+    required this.repository,
+    this.shortcutBus,
+    this.hotkeyService,
+  });
 
   final PasswordRepository repository;
+
+  /// 应用级快捷键总线（可选；为空时快捷键不生效）。
+  final ShortcutBus? shortcutBus;
+
+  /// 桌面端全局热键服务（可选；设置页用于自定义热键）。
+  final GlobalHotkeyService? hotkeyService;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -29,6 +47,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   late final TextEditingController _searchController;
+  late final FocusNode _searchFocus;
 
   List<PasswordItem> _items = <PasswordItem>[];
   String _query = '';
@@ -49,7 +68,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     _searchController = TextEditingController();
+    _searchFocus = FocusNode();
 
+    widget.shortcutBus?.addListener(_onShortcut);
     widget.repository.itemsNotifier.addListener(_onItemsChanged);
 
     _items = widget.repository.itemsNotifier.value;
@@ -66,6 +87,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     for (final timer in _timers) {
       timer.cancel();
     }
+    widget.shortcutBus?.removeListener(_onShortcut);
+    _searchFocus.dispose();
+    _searchController.dispose();
     _lan?.dispose();
 
     // Remove lifecycle observer
@@ -109,11 +133,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   // 显示锁定屏幕的方法
   void _showLockScreen() {
+    // 标记全局锁定状态：全局热键/快速填充等入口据此拒绝泄漏条目。
+    AppLockState.markLocked();
     // 使用根导航器确保锁定屏幕覆盖整个应用
     Navigator.of(context, rootNavigator: true).push(
       MaterialPageRoute(
         builder: (context) => LoginScreen(
           onUnlocked: () {
+            AppLockState.markUnlocked();
             // 解锁后关闭锁定屏幕
             Navigator.of(context).pop();
           },
@@ -742,33 +769,66 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     try {
       final List<PasswordItem> incoming =
           await _dataExportService.importJson(filePath);
-      final Map<String, PasswordItem> existing = <String, PasswordItem>{
-        for (final PasswordItem it in widget.repository.itemsNotifier.value)
-          it.id: it,
-      };
-
-      int added = 0;
-      int updated = 0;
-      for (final PasswordItem item in incoming) {
-        final PasswordItem? local = existing[item.id];
-        if (local == null) {
-          await widget.repository.addItem(item);
-          added++;
-        } else if (item.updatedAt.isAfter(local.updatedAt)) {
-          // newer-wins：导入项更新则覆盖
-          await widget.repository.updateItem(item);
-          updated++;
-        }
-        // 导入项更旧则跳过
-      }
-      if (!mounted) return;
-      _showSnackBar(
-        '导入完成：新增 $added 条，更新 $updated 条',
-        ThemeConfig.successColor,
+      final (:valid, :invalid) = const ImportValidator().filter(incoming);
+      final ImportSummary summary =
+          await ImportMerger(widget.repository).merge(valid);
+      // 合并器不感知无效项，补回展示。
+      final ImportSummary full = ImportSummary(
+        added: summary.added,
+        updated: summary.updated,
+        skipped: summary.skipped,
+        invalid: invalid,
       );
+      if (!mounted) return;
+      _showSnackBar('导入完成：$full', ThemeConfig.successColor);
     } catch (e) {
       if (!mounted) return;
       _showSnackBar('导入失败: $e', ThemeConfig.dangerColor);
+    }
+  }
+
+  /// 打开统一导入入口面板。
+  ///
+  /// 文件导入走 [_importData]（复用既有 JSON 流程），扫码与截图跳转各自页面，
+  /// 完成后通过回调刷新提示。供 PopupMenu 与应用内快捷键共用。
+  Future<void> _openImportHub() async {
+    await ImportHubSheet.show(
+      context,
+      repository: widget.repository,
+      onPickFile: () {
+        // 先关闭底部弹层，再走文件导入流程。
+        Navigator.of(context).pop();
+        _importData();
+      },
+      onResult: (String? message) {
+        if (message == null) return;
+        if (!mounted) return;
+        final bool isError =
+            message.startsWith('二维码内无有效条目') || message.contains('失败');
+        _showSnackBar(
+          message,
+          isError ? ThemeConfig.dangerColor : ThemeConfig.successColor,
+        );
+      },
+    );
+  }
+
+  /// 应用级快捷键动作分发。
+  void _onShortcut() {
+    final AppShortcutAction? action = widget.shortcutBus?.consume();
+    if (action == null || !mounted) return;
+    switch (action) {
+      case AppShortcutAction.openImport:
+        _openImportHub();
+      case AppShortcutAction.exportData:
+        _exportData();
+      case AppShortcutAction.focusSearch:
+        _searchFocus.requestFocus();
+      case AppShortcutAction.lockNow:
+        _showLockScreen();
+      case AppShortcutAction.quickFill:
+        // 全局热键由 App 层的 QuickFillHost 处理（独立小窗），此处不响应。
+        break;
     }
   }
 
@@ -816,7 +876,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   _exportData();
                   break;
                 case 'import':
-                  _importData();
+                  _openImportHub();
+                  break;
+                case 'settings':
+                  // 未注入热键服务（异常路径）时不进设置页，避免误建
+                  // 一个未 init 的服务实例导致"注册失败"误导提示。
+                  final GlobalHotkeyService? hotkeyService =
+                      widget.hotkeyService;
+                  if (hotkeyService != null) {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => SettingsScreen(
+                          hotkeyService: hotkeyService,
+                        ),
+                      ),
+                    );
+                  }
                   break;
               }
             },
@@ -827,6 +902,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 child: ListTile(
                   leading: Icon(Icons.lock_outline),
                   title: Text('立即锁定'),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                ),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem<String>(
+                value: 'settings',
+                child: ListTile(
+                  leading: Icon(Icons.settings_outlined),
+                  title: Text('设置'),
                   contentPadding: EdgeInsets.zero,
                   dense: true,
                 ),
@@ -859,6 +944,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
             child: TextField(
               controller: _searchController,
+              focusNode: _searchFocus,
               onChanged: (String v) => setState(() => _query = v.trim()),
               style: const TextStyle(color: ThemeConfig.textColor),
               decoration: InputDecoration(

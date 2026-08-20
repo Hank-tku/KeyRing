@@ -151,3 +151,6 @@ pubspec.lock  # 对于应用程序项目，建议提交；对于库包，可忽�
 # 设计草稿目录（原型/截图，不纳入版本管理）
 design_logo/
 design_preview/
+
+# ZCode 会话工作目录
+.zcode/
