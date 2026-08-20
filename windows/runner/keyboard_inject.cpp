@@ -1,6 +1,4 @@
-// windows.h 必须置于 flutter 头文件之前：MSVC 下其宏会干扰后续
-// StandardMethodCodec<EncodableValue>::GetInstance() 等模板表达式的解析
-//（与 hotkey_manager_windows 插件一致的 include 顺序）。
+// windows.h 置于最前，与官方 windows 插件的 include 习惯一致。
 #include <windows.h>
 
 #include "keyboard_inject.h"
@@ -134,7 +132,7 @@ void Register(flutter::BinaryMessenger* messenger) {
   auto fg_channel =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
           messenger, "keyring/foreground",
-          &flutter::StandardMethodCodec<flutter::EncodableValue>::GetInstance());
+          &flutter::StandardMethodCodec::GetInstance());
   fg_channel->SetMethodCallHandler(
       [](const flutter::MethodCall<flutter::EncodableValue>& call,
          std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
@@ -148,7 +146,7 @@ void Register(flutter::BinaryMessenger* messenger) {
   auto channel =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
           messenger, "keyring/keyboard",
-          &flutter::StandardMethodCodec<flutter::EncodableValue>::GetInstance());
+          &flutter::StandardMethodCodec::GetInstance());
 
   channel->SetMethodCallHandler(
       [](const flutter::MethodCall<flutter::EncodableValue>& call,
@@ -201,7 +199,7 @@ void Register(flutter::BinaryMessenger* messenger) {
   auto check_channel =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
           messenger, "keyring/hotkeycheck",
-          &flutter::StandardMethodCodec<flutter::EncodableValue>::GetInstance());
+          &flutter::StandardMethodCodec::GetInstance());
   check_channel->SetMethodCallHandler(
       [](const flutter::MethodCall<flutter::EncodableValue>& call,
          std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
