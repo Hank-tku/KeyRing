@@ -1,6 +1,9 @@
-#include "keyboard_inject.h"
-
+// windows.h 必须置于 flutter 头文件之前：MSVC 下其宏会干扰后续
+// StandardMethodCodec<EncodableValue>::GetInstance() 等模板表达式的解析
+//（与 hotkey_manager_windows 插件一致的 include 顺序）。
 #include <windows.h>
+
+#include "keyboard_inject.h"
 
 #include <string>
 #include <vector>

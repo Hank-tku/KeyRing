@@ -53,6 +53,11 @@ android {
 
     buildTypes {
         release {
+            isMinifyEnabled = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             if (hasReleaseKeystore) {
                 // 正式发布：本地有 key.properties 时用 release keystore 签名
                 signingConfig = signingConfigs.getByName("release")
