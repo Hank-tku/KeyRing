@@ -99,6 +99,26 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Restore release signing config
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 未配置，回退 debug 签名（不可覆盖安装已发布版本）"
+            exit 0
+          fi
+          # build.gradle.kts 中 storeFile 相对 android/app/ 目录解析
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/app/keyring-release.jks
+          cat > android/key.properties <<EOF
+          storeFile=keyring-release.jks
+          storePassword=$STORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
       - name: Build Android APK (split per ABI)
         run: flutter build apk --release --split-per-abi
 
