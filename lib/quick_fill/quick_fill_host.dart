@@ -6,6 +6,7 @@ import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/services.dart';
 
 import '../models/password_item.dart';
+import '../models/workspace.dart';
 import '../services/foreground_app_service.dart';
 import '../services/keyboard_inject_service.dart';
 import '../services/password_repository.dart';
@@ -103,6 +104,10 @@ class QuickFillHost {
     switch (call.method) {
       case 'requestItems':
         // 脱敏：不含密码。按既有序（收藏优先、更新时间倒序）。
+        // 附带工作区名，面板多工作区时便于区分。
+        final Map<String, Workspace> workspaceNames = <String, Workspace>{
+          for (final Workspace w in repository.workspacesNotifier.value) w.id: w,
+        };
         final List<Map<String, String>> payload = <Map<String, String>>[
           for (final PasswordItem it in repository.itemsNotifier.value)
             <String, String>{
@@ -110,6 +115,7 @@ class QuickFillHost {
               'title': it.title,
               'username': it.username,
               'url': it.url ?? '',
+              'workspace': workspaceNames[it.workspaceId]?.name ?? '',
             },
         ];
         return jsonEncode(payload);

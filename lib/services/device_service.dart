@@ -55,6 +55,12 @@ class DeviceService {
     return 'Unknown';
   }
 
+  /// 设备类：mobile（Android/iOS）或 desktop（macOS/Windows/Linux）。
+  /// 同步协议据此执行工作区选择性同步（见设计文档 §5）。
+  String getDeviceClass() {
+    return Platform.isAndroid || Platform.isIOS ? 'mobile' : 'desktop';
+  }
+
   /// Get or create a friendly device name (e.g., "Android-Pixel", "macOS-MacBook")
   Future<String> getOrCreateDeviceName() async {
     try {

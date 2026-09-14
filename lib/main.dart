@@ -39,8 +39,9 @@ Future<void> main(List<String> args) async {
 
   final PasswordRepository repository = PasswordRepository();
 
-  await repository.init();
+  // 必须先于 init()：结构迁移（onUpgrade）发生前做整库备份。
   await MigrationService(repository: repository).prepareCompatibility();
+  await repository.init();
   runApp(KeyRingApp(repository: repository));
 }
 
@@ -184,7 +185,10 @@ class _KeyRingAppState extends State<KeyRingApp>
     if (AppLockState.isLocked) return;
     _navigatorKey.currentState?.push(
       MaterialPageRoute<void>(
-        builder: (_) => SettingsScreen(hotkeyService: _hotkeyService),
+        builder: (_) => SettingsScreen(
+          hotkeyService: _hotkeyService,
+          repository: widget.repository,
+        ),
       ),
     );
   }

@@ -152,24 +152,46 @@ void main() {
       );
 
       final Map<String, dynamic> message = codec.syncData(
-        items: <PasswordItem>[item],
-        vaultVersion: 1,
+        itemMaps: <Map<String, dynamic>>[item.toMap()],
+        deviceClass: 'mobile',
+        vaultVersion: 2,
         timestamp: DateTime.fromMillisecondsSinceEpoch(123),
       );
       final SyncDataPayload payload = codec.readSyncData(message);
 
       expect(codec.messageType(message), SyncMessageType.syncData);
-      expect(message['protocolVersion'], equals(1));
-      expect(message['vaultVersion'], equals(1));
+      expect(message['protocolVersion'], equals(2));
+      expect(message['vaultVersion'], equals(2));
+      expect(message['deviceClass'], equals('mobile'));
       expect(message['timestamp'], equals(123));
       expect(payload.isLegacyPeer, isFalse);
       expect(payload.items.single.id, equals('sync-id'));
+      expect(payload.itemMaps.single.containsKey('workspaceId'), isTrue);
 
       final SyncDataPayload legacyPayload = codec.readSyncData({
         'type': SyncMessageType.syncData,
         'items': <Map<String, dynamic>>[item.toMap()],
       });
       expect(legacyPayload.isLegacyPeer, isTrue);
+      expect(legacyPayload.workspaces, isEmpty);
+    });
+
+    test('hello 协商：v2 携带能力与设备类，v1 返回 null', () {
+      final SyncProtocolCodec codec = SyncProtocolCodec();
+
+      final PeerCapabilities caps = codec.readHelloCapabilities(
+        codec.hello(deviceId: 'd1', deviceName: 'N', deviceClass: 'desktop'),
+      )!;
+      expect(caps.isDesktop, isTrue);
+
+      expect(
+        codec.readHelloCapabilities(<String, dynamic>{
+          'type': 'hello',
+          'deviceId': 'd2',
+          'deviceName': 'Old',
+        }),
+        isNull,
+      );
     });
 
     test(
@@ -186,7 +208,7 @@ void main() {
           documentsPath: documents.path,
         );
         SharedPreferences.setMockInitialValues(<String, Object>{
-          'vault_version': 1,
+          'vault_version': 2,
         });
 
         final PasswordItem item = PasswordItem(
@@ -210,8 +232,8 @@ void main() {
             jsonDecode(await File(result.path).readAsString())
                 as Map<String, dynamic>;
         expect(exported['app'], equals('KeyRing'));
-        expect(exported['exportVersion'], equals(1));
-        expect(exported['vaultVersion'], equals(1));
+        expect(exported['exportVersion'], equals(2));
+        expect(exported['vaultVersion'], equals(2));
         expect(exported['itemCount'], equals(1));
         expect(
           (exported['items'] as List<dynamic>).single['password'],
@@ -227,13 +249,13 @@ void main() {
       PathProviderPlatform.instance = FakePathProviderPlatform(
         documentsPath: documents.path,
       );
-      SharedPreferences.setMockInitialValues(<String, Object>{
-        'vault_version': 1,
-      });
+        SharedPreferences.setMockInitialValues(<String, Object>{
+          'vault_version': 2,
+        });
 
-      final DataExportResult result = await DataExportService().exportJson(
-        <PasswordItem>[],
-      );
+        final DataExportResult result = await DataExportService().exportJson(
+          <PasswordItem>[],
+        );
 
       expect(result.path, startsWith('${documents.path}/exports/'));
       expect(await File(result.path).exists(), isTrue);

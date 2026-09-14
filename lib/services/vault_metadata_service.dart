@@ -17,8 +17,10 @@ class VaultMetadata {
 }
 
 class VaultMetadataService {
-  static const int currentVaultVersion = 1;
-  static const int currentProtocolVersion = 1;
+  /// v2：工作区/分组/保密项结构（workspaces、item_groups、tombstones 表，
+  /// password_items 新增 workspaceId/groupId/customFields 列）。
+  static const int currentVaultVersion = 2;
+  static const int currentProtocolVersion = 2;
 
   static const String _vaultVersionKey = 'vault_version';
   static const String _needsMigrationKey = 'vault_needs_migration';
@@ -30,11 +32,13 @@ class VaultMetadataService {
     final bool hasExplicitVaultVersion = storedVaultVersion != null;
 
     return VaultMetadata(
-      vaultVersion: storedVaultVersion ?? currentVaultVersion,
+      // 无显式版本的库都是 v1 时代创建的（v1 应用在启动时就会写入标志）。
+      vaultVersion: storedVaultVersion ?? 1,
       protocolVersion: currentProtocolVersion,
       hasExplicitVaultVersion: hasExplicitVaultVersion,
       needsMigration:
-          prefs.getBool(_needsMigrationKey) ?? !hasExplicitVaultVersion,
+          prefs.getBool(_needsMigrationKey) ??
+          ((storedVaultVersion ?? 1) < currentVaultVersion),
       legacyBackupPath: prefs.getString(_legacyBackupPathKey),
     );
   }

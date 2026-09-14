@@ -7,7 +7,10 @@ import 'detail_screen.dart';
 import 'edit_item_screen.dart';
 import 'import/import_hub_sheet.dart';
 import 'settings_screen.dart';
+import 'workspace_management_screen.dart';
+import '../models/item_group.dart';
 import '../models/password_item.dart';
+import '../models/workspace.dart';
 import '../services/app_lock_state.dart';
 import '../services/data_export_service.dart';
 import '../services/global_hotkey_service.dart';
@@ -59,6 +62,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   // 筛选状态
   bool _onlyFavorites = false;
 
+  // 工作区 / 分组筛选状态
+  List<Workspace> _workspaces = <Workspace>[];
+  List<ItemGroup> _groups = <ItemGroup>[];
+  String _selectedWorkspaceId = Workspace.defaultId;
+  String? _selectedGroupId; // null = 全部分组
+
   // 同步状态
   SyncState _syncState = SyncState.idle;
 
@@ -72,8 +81,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     widget.shortcutBus?.addListener(_onShortcut);
     widget.repository.itemsNotifier.addListener(_onItemsChanged);
+    widget.repository.workspacesNotifier.addListener(_onWorkspacesChanged);
+    widget.repository.groupsNotifier.addListener(_onGroupsChanged);
 
     _items = widget.repository.itemsNotifier.value;
+    _workspaces = widget.repository.workspacesNotifier.value;
+    _groups = widget.repository.groupsNotifier.value;
+    _fixSelection();
     // Initialize LAN service but don't start it yet
     _lan = LanSyncService(repository: widget.repository);
 
@@ -88,6 +102,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       timer.cancel();
     }
     widget.shortcutBus?.removeListener(_onShortcut);
+    widget.repository.itemsNotifier.removeListener(_onItemsChanged);
+    widget.repository.workspacesNotifier.removeListener(_onWorkspacesChanged);
+    widget.repository.groupsNotifier.removeListener(_onGroupsChanged);
     _searchFocus.dispose();
     _searchController.dispose();
     _lan?.dispose();
@@ -96,6 +113,38 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
 
     super.dispose();
+  }
+
+  void _onWorkspacesChanged() {
+    if (!mounted) return;
+    setState(() => _workspaces = widget.repository.workspacesNotifier.value);
+    _fixSelection();
+  }
+
+  void _onGroupsChanged() {
+    if (!mounted) return;
+    setState(() => _groups = widget.repository.groupsNotifier.value);
+    _fixSelection();
+  }
+
+  /// 选中项失效时回落：工作区回落默认（或第一个），分组不合法时清空。
+  void _fixSelection() {
+    if (_workspaces.isNotEmpty &&
+        !_workspaces.any((Workspace w) => w.id == _selectedWorkspaceId)) {
+      _selectedWorkspaceId = _workspaces
+              .any((Workspace w) => w.id == Workspace.defaultId)
+          ? Workspace.defaultId
+          : _workspaces.first.id;
+      _selectedGroupId = null;
+    }
+    if (_selectedGroupId != null &&
+        !_groups.any(
+          (ItemGroup g) =>
+              g.id == _selectedGroupId &&
+              g.workspaceId == _selectedWorkspaceId,
+        )) {
+      _selectedGroupId = null;
+    }
   }
 
   // 应用生命周期状态变化回调
@@ -155,16 +204,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// 按搜索词 + 收藏筛选。返回过滤后（未排序）的列表。
+  /// 按工作区 + 分组 + 搜索词 + 收藏筛选。返回过滤后（未排序）的列表。
   List<PasswordItem> _applyFilters(List<PasswordItem> source) {
     return source.where((PasswordItem item) {
+      if (item.workspaceId != _selectedWorkspaceId) return false;
+      if (_selectedGroupId != null && item.groupId != _selectedGroupId) {
+        return false;
+      }
       if (_onlyFavorites && !item.isFavorite) return false;
       if (_query.isEmpty) return true;
       final String q = _query.toLowerCase();
       return item.title.toLowerCase().contains(q) ||
           item.username.toLowerCase().contains(q) ||
           (item.url ?? '').toLowerCase().contains(q) ||
-          (item.notes ?? '').toLowerCase().contains(q);
+          (item.notes ?? '').toLowerCase().contains(q) ||
+          item.customFields.any(
+            (f) =>
+                f.label.toLowerCase().contains(q) ||
+                f.value.toLowerCase().contains(q),
+          );
     }).toList();
   }
 
@@ -196,12 +254,281 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _add() async {
     final bool? changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
-        builder: (BuildContext context) =>
-            EditItemScreen(repository: widget.repository),
+        builder: (BuildContext context) => EditItemScreen(
+          repository: widget.repository,
+          initialWorkspaceId: _selectedWorkspaceId,
+        ),
       ),
     );
     if (changed == true && mounted) {
       setState(() {});
+    }
+  }
+
+  /// 长按条目菜单：移动归属 / 收藏切换 / 删除。
+  Future<void> _showItemMenu(PasswordItem item) async {
+    HapticFeedback.mediumImpact();
+    final String? action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (BuildContext context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            ListTile(
+              leading: const Icon(Icons.drive_file_move_outlined),
+              title: const Text('移动到分组/工作区'),
+              onTap: () => Navigator.of(context).pop('move'),
+            ),
+            ListTile(
+              leading: Icon(
+                item.isFavorite ? Icons.bookmark_remove_outlined : Icons.bookmark_add_outlined,
+              ),
+              title: Text(item.isFavorite ? '取消收藏' : '收藏'),
+              onTap: () => Navigator.of(context).pop('favorite'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('删除'),
+              textColor: ThemeConfig.dangerColor,
+              iconColor: ThemeConfig.dangerColor,
+              onTap: () => Navigator.of(context).pop('delete'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == null || !mounted) return;
+    switch (action) {
+      case 'move':
+        await _moveItem(item);
+      case 'favorite':
+        await _toggleFavorite(item);
+      case 'delete':
+        await _delete(item);
+    }
+  }
+
+  /// 双级选择：先工作区，再分组（可跳过=未分组）。
+  Future<void> _moveItem(PasswordItem item) async {
+    final List<Workspace> workspaces = _workspaces;
+    final String? workspaceId = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (BuildContext context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: <Widget>[
+            const Padding(
+              padding: EdgeInsets.all(ThemeConfig.space16),
+              child: Text(
+                '移动到工作区',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+            for (final Workspace w in workspaces)
+              ListTile(
+                leading: Text(w.icon ?? '📁', style: const TextStyle(fontSize: 22)),
+                title: Text(w.name),
+                trailing: w.id == item.workspaceId
+                    ? const Icon(Icons.check, size: 18)
+                    : null,
+                onTap: () => Navigator.of(context).pop(w.id),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (workspaceId == null || !mounted) return;
+
+    final List<ItemGroup> groups = _groups
+        .where((ItemGroup g) => g.workspaceId == workspaceId)
+        .toList();
+    final String? groupId = await showModalBottomSheet<String?>(
+      context: context,
+      showDragHandle: true,
+      builder: (BuildContext context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: <Widget>[
+            const Padding(
+              padding: EdgeInsets.all(ThemeConfig.space16),
+              child: Text(
+                '移动到分组',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.folder_open),
+              title: const Text('未分组'),
+              trailing: item.groupId == null && workspaceId == item.workspaceId
+                  ? const Icon(Icons.check, size: 18)
+                  : null,
+              onTap: () => Navigator.of(context).pop(''),
+            ),
+            for (final ItemGroup g in groups)
+              ListTile(
+                leading: const Icon(Icons.folder),
+                title: Text(g.name),
+                trailing:
+                    g.id == item.groupId ? const Icon(Icons.check, size: 18) : null,
+                onTap: () => Navigator.of(context).pop(g.id),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (groupId == null || !mounted) return;
+
+    try {
+      await widget.repository.moveItem(
+        item.id,
+        workspaceId,
+        groupId: groupId.isEmpty ? null : groupId,
+      );
+      if (mounted) {
+        _showSnackBar('已移动', ThemeConfig.successColor);
+      }
+    } catch (e) {
+      if (mounted) {
+        _showSnackBar('移动失败: $e', ThemeConfig.dangerColor);
+      }
+    }
+  }
+
+  /// 打开工作区管理页。
+  Future<void> _manageWorkspaces() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            WorkspaceManagementScreen(repository: widget.repository),
+      ),
+    );
+    if (mounted) {
+      setState(() {
+        _workspaces = widget.repository.workspacesNotifier.value;
+        _groups = widget.repository.groupsNotifier.value;
+      });
+      _fixSelection();
+    }
+  }
+
+  /// 新建分组（当前工作区内）。
+  Future<void> _addGroup() async {
+    final TextEditingController controller = TextEditingController();
+    final String? name = await showDialog<String>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: const Text('新建分组'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: '分组名称，如：开发 / 运维',
+            isDense: true,
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('创建'),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty || !mounted) return;
+    try {
+      await widget.repository.addGroup(_selectedWorkspaceId, name);
+    } catch (e) {
+      if (mounted) _showSnackBar('创建失败: $e', ThemeConfig.dangerColor);
+    }
+  }
+
+  /// 长按分组 chip：重命名 / 删除。
+  Future<void> _showGroupMenu(ItemGroup group) async {
+    final String? action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (BuildContext context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('重命名分组'),
+              onTap: () => Navigator.of(context).pop('rename'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('删除分组（条目保留，归入未分组）'),
+              textColor: ThemeConfig.dangerColor,
+              iconColor: ThemeConfig.dangerColor,
+              onTap: () => Navigator.of(context).pop('delete'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == null || !mounted) return;
+
+    if (action == 'rename') {
+      final TextEditingController controller = TextEditingController(
+        text: group.name,
+      );
+      final String? name = await showDialog<String>(
+        context: context,
+        builder: (BuildContext context) => AlertDialog(
+          title: const Text('重命名分组'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(isDense: true),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () =>
+                  Navigator.of(context).pop(controller.text.trim()),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      );
+      if (name != null && name.isNotEmpty && mounted) {
+        await widget.repository.updateGroup(group.copyWith(name: name));
+      }
+    } else if (action == 'delete') {
+      final bool? confirm = await showDialog<bool>(
+        context: context,
+        builder: (BuildContext context) => AlertDialog(
+          title: const Text('删除分组'),
+          content: Text('删除分组"${group.name}"？其中的条目会保留并归入未分组。'),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: TextButton.styleFrom(
+                foregroundColor: ThemeConfig.dangerColor,
+              ),
+              child: const Text('删除'),
+            ),
+          ],
+        ),
+      );
+      if (confirm == true && mounted) {
+        await widget.repository.deleteGroup(group.id);
+      }
     }
   }
 
@@ -621,11 +948,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _exportData() async {
     if (_exporting) return;
 
+    final bool hasHidden = _workspaces.any(
+      (Workspace w) => w.syncPolicy != SyncPolicy.full,
+    );
     final bool? confirmed = await showDialog<bool>(
       context: context,
       builder: (BuildContext context) => AlertDialog(
         title: const Text('导出数据'),
-        content: const Text('导出的 JSON 文件会包含完整账号、用户名、密码和备注。请只保存到你信任的位置，并妥善保管。'),
+        content: Text(
+          hasHidden
+              ? '导出的 JSON 文件会包含完整账号、用户名、密码、备注和保密项，'
+                    '且包含「仅移动端/仅本机」工作区的数据。\n\n'
+                    '文件为明文，请只保存到你信任的位置，并妥善保管。'
+              : '导出的 JSON 文件会包含完整账号、用户名、密码、备注和保密项。'
+                    '请只保存到你信任的位置，并妥善保管。',
+        ),
         actions: <Widget>[
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -645,6 +982,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     try {
       final DataExportResult result = await _dataExportService.exportJson(
         widget.repository.itemsNotifier.value,
+        workspaces: widget.repository.workspacesNotifier.value,
+        groups: widget.repository.groupsNotifier.value,
       );
       if (!mounted) return;
       await Clipboard.setData(ClipboardData(text: result.path));
@@ -767,16 +1106,29 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final String filePath = picked.files.single.path!;
 
     try {
-      final List<PasswordItem> incoming =
+      final ParsedImport bundle =
           await _dataExportService.importJson(filePath);
-      final (:valid, :invalid) = const ImportValidator().filter(incoming);
+      final (:valid, :invalid) = const ImportValidator()
+          .filter(bundle.items);
+      // 文件导入走线格式合并：结构恢复 + 精确字段保留 + 墓碑防复活。
+      // 仅校验通过的条目进入合并（无效条目整条丢弃）。
+      final Set<String> validIds = <String>{for (final i in valid) i.id};
+      final ParsedImport filteredBundle = ParsedImport(
+        rawItems: bundle.rawItems
+            .where((Map<String, dynamic> m) => validIds.contains(m['id']))
+            .toList(),
+        rawWorkspaces: bundle.rawWorkspaces,
+        rawGroups: bundle.rawGroups,
+        exportVersion: bundle.exportVersion,
+      );
       final ImportSummary summary =
-          await ImportMerger(widget.repository).merge(valid);
-      // 合并器不感知无效项，补回展示。
+          await ImportMerger(widget.repository).mergeBundle(filteredBundle);
       final ImportSummary full = ImportSummary(
         added: summary.added,
         updated: summary.updated,
         skipped: summary.skipped,
+        deleted: summary.deleted,
+        dropped: summary.dropped,
         invalid: invalid,
       );
       if (!mounted) return;
@@ -851,7 +1203,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('KeyRing'),
+        title: _buildWorkspaceSwitcher(),
         titleTextStyle: const TextStyle(
           color: ThemeConfig.primaryColor,
           fontSize: ThemeConfig.fontSizeTitle,
@@ -881,17 +1233,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 case 'settings':
                   // 未注入热键服务（异常路径）时不进设置页，避免误建
                   // 一个未 init 的服务实例导致"注册失败"误导提示。
-                  final GlobalHotkeyService? hotkeyService =
-                      widget.hotkeyService;
-                  if (hotkeyService != null) {
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => SettingsScreen(
-                          hotkeyService: hotkeyService,
-                        ),
-                      ),
-                    );
-                  }
+                      final GlobalHotkeyService? hotkeyService =
+                          widget.hotkeyService;
+                      if (hotkeyService != null) {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => SettingsScreen(
+                              hotkeyService: hotkeyService,
+                              repository: widget.repository,
+                            ),
+                          ),
+                        );
+                      }
                   break;
               }
             },
@@ -1016,52 +1369,187 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  /// 构建筛选工具栏（仅收藏筛选 + 计数）。
-  /// 列表默认按修改时间倒序，不再提供排序切换。
-  Widget _buildToolbar(int count) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      child: Row(
-        children: <Widget>[
-          FilterChip(
-            label: const Text('收藏'),
-            selected: _onlyFavorites,
-            onSelected: (bool v) => setState(() => _onlyFavorites = v),
-            selectedColor: ThemeConfig.primarySoft,
-            checkmarkColor: ThemeConfig.primaryColor,
-            labelStyle: TextStyle(
-              color: _onlyFavorites
-                  ? ThemeConfig.primaryColor
-                  : ThemeConfig.secondaryTextColor,
-            ),
-            side: BorderSide(
-              color: _onlyFavorites
-                  ? ThemeConfig.primaryColor.withValues(alpha: 0.4)
-                  : ThemeConfig.inputBorderColor,
-            ),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(ThemeConfig.radiusPill),
-            ),
-            showCheckmark: false,
-            avatar: Icon(
-              _onlyFavorites ? Icons.bookmark : Icons.bookmark_border,
-              size: 18,
-              color: _onlyFavorites
-                  ? ThemeConfig.favoriteColor
-                  : ThemeConfig.secondaryTextColor,
-            ),
-          ),
-          const Spacer(),
-          Text(
-            '共 $count 项',
-            style: const TextStyle(
-              color: ThemeConfig.hintTextColor,
-              fontSize: ThemeConfig.fontSizeCaption,
+  /// 顶栏工作区切换器：点击标题弹出工作区菜单（含策略标识与管理入口）。
+  Widget _buildWorkspaceSwitcher() {
+    final Workspace? current = _workspaces
+        .where((Workspace w) => w.id == _selectedWorkspaceId)
+        .firstOrNull;
+    final String label =
+        current == null ? 'KeyRing' : '${current.icon ?? ''} ${current.name}'.trim();
+
+    return PopupMenuButton<String>(
+      tooltip: '切换工作区',
+      position: PopupMenuPosition.under,
+      initialValue: _selectedWorkspaceId,
+      constraints: const BoxConstraints(minWidth: 180),
+      onSelected: (String value) {
+        if (value == '__manage__') {
+          _manageWorkspaces();
+          return;
+        }
+        if (value == _selectedWorkspaceId) return;
+        setState(() {
+          _selectedWorkspaceId = value;
+          _selectedGroupId = null;
+        });
+      },
+      itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+        for (final Workspace w in _workspaces)
+          PopupMenuItem<String>(
+            value: w.id,
+            child: Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text('${w.icon ?? ''} ${w.name}'.trim()),
+                ),
+                if (w.syncPolicy == SyncPolicy.mobileOnly)
+                  const Icon(Icons.smartphone, size: 15)
+                else if (w.syncPolicy == SyncPolicy.localOnly)
+                  const Icon(Icons.phone_iphone_outlined, size: 15),
+              ],
             ),
           ),
-        ],
+        const PopupMenuDivider(),
+        const PopupMenuItem<String>(
+          value: '__manage__',
+          height: 44,
+          child: Row(
+            children: <Widget>[
+              Icon(Icons.tune, size: 18),
+              SizedBox(width: ThemeConfig.space8),
+              Text('管理工作区'),
+            ],
+          ),
+        ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const Icon(
+              Icons.expand_more,
+              size: 22,
+              color: ThemeConfig.primaryColor,
+            ),
+          ],
+        ),
       ),
     );
+  }
+
+  /// 分组/收藏筛选行（工作区切换在顶栏标题处）。
+  Widget _buildToolbar(int count) {
+    final List<ItemGroup> workspaceGroups = _groups
+        .where((ItemGroup g) => g.workspaceId == _selectedWorkspaceId)
+        .toList();
+
+    return SizedBox(
+      height: 44,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+        children: <Widget>[
+              Padding(
+                padding: const EdgeInsets.only(right: ThemeConfig.space8),
+                child: FilterChip(
+                  label: const Text('收藏'),
+                  selected: _onlyFavorites,
+                  onSelected: (bool v) => setState(() => _onlyFavorites = v),
+                  selectedColor: ThemeConfig.primarySoft,
+                  checkmarkColor: ThemeConfig.primaryColor,
+                  labelStyle: TextStyle(
+                    color: _onlyFavorites
+                        ? ThemeConfig.primaryColor
+                        : ThemeConfig.secondaryTextColor,
+                  ),
+                  side: BorderSide(
+                    color: _onlyFavorites
+                        ? ThemeConfig.primaryColor.withValues(alpha: 0.4)
+                        : ThemeConfig.inputBorderColor,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(ThemeConfig.radiusPill),
+                  ),
+                  showCheckmark: false,
+                  avatar: Icon(
+                    _onlyFavorites ? Icons.bookmark : Icons.bookmark_border,
+                    size: 18,
+                    color: _onlyFavorites
+                        ? ThemeConfig.favoriteColor
+                        : ThemeConfig.secondaryTextColor,
+                  ),
+                ),
+              ),
+              for (final ItemGroup g in workspaceGroups)
+                Padding(
+                  padding: const EdgeInsets.only(right: ThemeConfig.space8),
+                  child: GestureDetector(
+                    onLongPress: () => _showGroupMenu(g),
+                    child: FilterChip(
+                      label: Text(g.name),
+                      selected: _selectedGroupId == g.id,
+                      onSelected: (bool v) => setState(
+                        () => _selectedGroupId = v ? g.id : null,
+                      ),
+                      selectedColor: ThemeConfig.primarySoft,
+                      checkmarkColor: ThemeConfig.primaryColor,
+                      labelStyle: TextStyle(
+                        color: _selectedGroupId == g.id
+                            ? ThemeConfig.primaryColor
+                            : ThemeConfig.secondaryTextColor,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(
+                          ThemeConfig.radiusPill,
+                        ),
+                      ),
+                      showCheckmark: false,
+                      avatar: const Icon(
+                        Icons.folder_outlined,
+                        size: 16,
+                        color: ThemeConfig.secondaryTextColor,
+                      ),
+                    ),
+                  ),
+                ),
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: ActionChip(
+                  avatar: const Icon(
+                    Icons.create_new_folder_outlined,
+                    size: 16,
+                    color: ThemeConfig.secondaryTextColor,
+                  ),
+                  label: const Text(
+                    '分组',
+                    style: TextStyle(color: ThemeConfig.secondaryTextColor),
+                  ),
+                  onPressed: _addGroup,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(ThemeConfig.radiusPill),
+                  ),
+                  side: const BorderSide(color: ThemeConfig.inputBorderColor),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Center(
+                child: Text(
+                  '共 $count 项',
+                  style: const TextStyle(
+                    color: ThemeConfig.hintTextColor,
+                    fontSize: ThemeConfig.fontSizeCaption,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
   }
 
   Icon _buildSyncIcon() {
@@ -1192,11 +1680,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       ),
       child: AppCard(
         onTap: () => _viewDetail(item),
-        onLongPress: () {
-          // 长按改为触感反馈切收藏，不再直接弹删除框（防误触）。
-          HapticFeedback.mediumImpact();
-          _toggleFavorite(item);
-        },
+        onLongPress: () => _showItemMenu(item),
         backgroundColor: item.isFavorite
             ? ThemeConfig.primarySoft
             : null,

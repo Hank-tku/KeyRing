@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/item_group.dart';
 import '../models/password_item.dart';
+import '../models/secret_field.dart';
+import '../models/workspace.dart';
 import '../services/password_repository.dart';
 import '../utils/password_utils.dart';
 import '../utils/theme_config.dart';
@@ -11,13 +14,51 @@ import '../widgets/shared/password_visibility_toggle.dart';
 import '../widgets/shared/strength_indicator.dart';
 
 class EditItemScreen extends StatefulWidget {
-  const EditItemScreen({super.key, required this.repository, this.initial});
+  const EditItemScreen({
+    super.key,
+    required this.repository,
+    this.initial,
+    this.initialWorkspaceId,
+  });
 
   final PasswordRepository repository;
   final PasswordItem? initial;
 
+  /// 新建条目时默认落入的工作区（首页当前选中工作区）。
+  final String? initialWorkspaceId;
+
   @override
   State<EditItemScreen> createState() => _EditItemScreenState();
+}
+
+/// 保密项的编辑草稿（控制器随行销毁）。
+class _FieldDraft {
+  _FieldDraft({
+    String label = '',
+    String value = '',
+    this.type = SecretFieldType.text,
+    bool? isProtected,
+  }) : labelController = TextEditingController(text: label),
+       valueController = TextEditingController(text: value),
+       protected =
+           isProtected ?? type == SecretFieldType.password;
+
+  final TextEditingController labelController;
+  final TextEditingController valueController;
+  SecretFieldType type;
+  bool protected;
+
+  SecretField toField() => SecretField(
+    label: labelController.text.trim(),
+    value: valueController.text,
+    type: type,
+    protected: protected,
+  );
+
+  void dispose() {
+    labelController.dispose();
+    valueController.dispose();
+  }
 }
 
 class _EditItemScreenState extends State<EditItemScreen> {
@@ -30,8 +71,32 @@ class _EditItemScreenState extends State<EditItemScreen> {
   bool _obscure = true;
   bool _optionalExpanded = false;
 
+  // 工作区 / 分组归属。
+  String _workspaceId = '';
+  String? _groupId;
+
+  // 保密项编辑草稿。
+  final List<_FieldDraft> _fieldDrafts = <_FieldDraft>[];
+
   // 是否有未保存改动，用于返回拦截。
   bool _dirty = false;
+
+  List<Workspace> get _workspaces => widget.repository.workspacesNotifier.value;
+
+  List<ItemGroup> get _workspaceGroups => widget.repository.groupsNotifier.value
+      .where((ItemGroup g) => g.workspaceId == _workspaceId)
+      .toList();
+
+  static const Map<String, SecretFieldType> _templateTypes =
+      <String, SecretFieldType>{
+        '安全码': SecretFieldType.password,
+        'PIN': SecretFieldType.password,
+        '客户号': SecretFieldType.text,
+        '会员号': SecretFieldType.text,
+        '备用邮箱': SecretFieldType.text,
+        '恢复代码': SecretFieldType.text,
+        '客服电话': SecretFieldType.tel,
+      };
 
   @override
   void initState() {
@@ -43,6 +108,23 @@ class _EditItemScreenState extends State<EditItemScreen> {
     _urlController = TextEditingController(text: item?.url ?? '');
     _notesController = TextEditingController(text: item?.notes ?? '');
     _isFavorite = item?.isFavorite ?? false;
+    _workspaceId = item?.workspaceId.isNotEmpty == true
+        ? item!.workspaceId
+        : (widget.initialWorkspaceId ?? Workspace.defaultId);
+    _groupId = item?.groupId;
+    for (final SecretField f in item?.customFields ?? const <SecretField>[]) {
+      _fieldDrafts.add(
+        _FieldDraft(
+          label: f.label,
+          value: f.value,
+          type: f.type,
+          isProtected: f.protected,
+        ),
+      );
+    }
+    // 工作区可能尚未就绪（仓库异步加载）：随后监听修正。
+    widget.repository.workspacesNotifier.addListener(_onWorkspacesChanged);
+    _onWorkspacesChanged();
     _loadOptionalExpanded();
 
     // 任一输入变化即标记为脏。
@@ -59,8 +141,30 @@ class _EditItemScreenState extends State<EditItemScreen> {
     }
   }
 
+  /// 首选工作区不存在时回落默认工作区；分组不属于当前工作区时清空。
+  void _onWorkspacesChanged() {
+    if (!mounted) return;
+    final List<Workspace> ws = _workspaces;
+    if (ws.isEmpty) return;
+    if (!ws.any((Workspace w) => w.id == _workspaceId)) {
+      _workspaceId = ws.any((Workspace w) => w.id == Workspace.defaultId)
+          ? Workspace.defaultId
+          : ws.first.id;
+      _groupId = null;
+    }
+    if (_groupId != null &&
+        !_workspaceGroups.any((ItemGroup g) => g.id == _groupId)) {
+      _groupId = null;
+    }
+    setState(() {});
+  }
+
   @override
   void dispose() {
+    widget.repository.workspacesNotifier.removeListener(_onWorkspacesChanged);
+    for (final _FieldDraft d in _fieldDrafts) {
+      d.dispose();
+    }
     _titleController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
@@ -187,15 +291,36 @@ class _EditItemScreenState extends State<EditItemScreen> {
       );
       return;
     }
-    // 校验账号名唯一性
+
+    // 保密项校验：label 非空且同条目内不重名。
+    final List<String> labels = <String>[];
+    for (final _FieldDraft d in _fieldDrafts) {
+      final String label = d.labelController.text.trim();
+      if (label.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('保密项名称不能为空')),
+        );
+        return;
+      }
+      if (labels.contains(label)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('保密项"$label"重复了')),
+        );
+        return;
+      }
+      labels.add(label);
+    }
+
+    // 校验账号名唯一性（工作区内唯一，设计文档 §7）。
     final bool exists = await widget.repository.titleExists(
       title,
+      workspaceId: _workspaceId,
       exceptId: widget.initial?.id,
     );
     if (!mounted) return;
     if (exists) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('账号名已存在，请使用其他账号名')),
+        const SnackBar(content: Text('该工作区内已存在同名账号，请使用其他账号名')),
       );
       return;
     }
@@ -219,12 +344,30 @@ class _EditItemScreenState extends State<EditItemScreen> {
                   : _notesController.text.trim(),
               updatedAt: DateTime.now(),
               isFavorite: _isFavorite,
+              workspaceId: _workspaceId,
+              groupId: _groupId,
+              customFields: <SecretField>[
+                for (final _FieldDraft d in _fieldDrafts) d.toField(),
+              ],
             );
 
     if (widget.initial == null) {
       await widget.repository.addItem(item);
     } else {
-      await widget.repository.updateItem(item);
+      // 编辑页支持改归属（等价于移动：隐藏工作区时由仓库处理墓碑）。
+      if (item.workspaceId != widget.initial!.workspaceId ||
+          item.groupId != widget.initial!.groupId) {
+        await widget.repository.updateItem(item);
+        if (item.workspaceId != widget.initial!.workspaceId) {
+          await widget.repository.moveItem(
+            item.id,
+            item.workspaceId,
+            groupId: item.groupId,
+          );
+        }
+      } else {
+        await widget.repository.updateItem(item);
+      }
     }
     if (mounted) Navigator.of(context).pop(true);
   }
@@ -326,6 +469,10 @@ class _EditItemScreenState extends State<EditItemScreen> {
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
           children: <Widget>[
             _buildBasicSection(),
+            const SizedBox(height: ThemeConfig.space12),
+            _buildLocationSection(),
+            const SizedBox(height: ThemeConfig.space12),
+            _buildSecretFieldsSection(),
             const SizedBox(height: ThemeConfig.space12),
             _buildOptionalSection(),
             const SizedBox(height: ThemeConfig.space8),
@@ -453,6 +600,285 @@ class _EditItemScreenState extends State<EditItemScreen> {
           child: StrengthIndicator(password: _passwordController.text),
         ),
       ],
+    );
+  }
+
+  /// 工作区 / 分组归属选择。切工作区时清空分组归属。
+  Widget _buildLocationSection() {
+    final List<Workspace> workspaces = _workspaces;
+    final List<ItemGroup> groups = _workspaceGroups;
+
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            '归属',
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                  color: ThemeConfig.textColor,
+                ),
+          ),
+          const SizedBox(height: ThemeConfig.space12),
+          FormFieldRow(
+            label: '工作区',
+            child: DropdownButtonFormField<String>(
+              key: ValueKey<String>('ws-$_workspaceId'),
+              initialValue: _workspaceId,
+              items: <DropdownMenuItem<String>>[
+                for (final Workspace w in workspaces)
+                  DropdownMenuItem<String>(
+                    value: w.id,
+                    child: Text(
+                      '${w.icon ?? ''} ${w.name}'.trim(),
+                      style: const TextStyle(color: ThemeConfig.textColor),
+                    ),
+                  ),
+              ],
+              onChanged: (String? v) {
+                if (v == null || v == _workspaceId) return;
+                setState(() {
+                  _workspaceId = v;
+                  _groupId = null;
+                  _dirty = true;
+                });
+              },
+              decoration: const InputDecoration(isDense: true),
+            ),
+          ),
+          FormFieldRow(
+            label: '分组',
+            child: DropdownButtonFormField<String?>(
+              key: ValueKey<String?>('grp-$_workspaceId-$_groupId'),
+              initialValue: _groupId,
+              items: <DropdownMenuItem<String?>>[
+                const DropdownMenuItem<String?>(value: null, child: Text('未分组')),
+                for (final ItemGroup g in groups)
+                  DropdownMenuItem<String?>(
+                    value: g.id,
+                    child: Text(
+                      g.name,
+                      style: const TextStyle(color: ThemeConfig.textColor),
+                    ),
+                  ),
+              ],
+              onChanged: (String? v) {
+                setState(() {
+                  _groupId = v;
+                  _dirty = true;
+                });
+              },
+              decoration: const InputDecoration(isDense: true),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _addField({String label = '', SecretFieldType? type}) {
+    setState(() {
+      _fieldDrafts.add(
+        _FieldDraft(
+          label: label,
+          type: type ?? SecretFieldType.text,
+        ),
+      );
+      _dirty = true;
+    });
+  }
+
+  /// 保密项区块：动态行 + 快捷模板。
+  Widget _buildSecretFieldsSection() {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  '保密项',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: ThemeConfig.textColor,
+                      ),
+                ),
+              ),
+              IconButton(
+                onPressed: () => _addField(),
+                icon: const Icon(Icons.add_circle_outline),
+                color: ThemeConfig.primaryColor,
+                tooltip: '添加保密项',
+              ),
+            ],
+          ),
+          if (_fieldDrafts.isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: ThemeConfig.space8),
+              child: Text(
+                '安全码、客户号、PIN 等附加信息，可添加为保密项（默认掩码显示，可复制）。',
+                style: const TextStyle(
+                  color: ThemeConfig.hintTextColor,
+                  fontSize: ThemeConfig.fontSizeCaption,
+                  height: 1.5,
+                ),
+              ),
+            )
+          else
+            for (int i = 0; i < _fieldDrafts.length; i++)
+              _buildFieldRow(i),
+          if (_fieldDrafts.isNotEmpty)
+            const Divider(color: ThemeConfig.dividerColor),
+          Wrap(
+            spacing: ThemeConfig.space8,
+            runSpacing: ThemeConfig.space8,
+            children: <Widget>[
+              for (final String template in kSecretFieldTemplates)
+                ActionChip(
+                  label: Text(template),
+                  labelStyle: const TextStyle(
+                    color: ThemeConfig.primaryColor,
+                    fontSize: ThemeConfig.fontSizeCaption,
+                  ),
+                  backgroundColor: ThemeConfig.primarySoft.withValues(alpha: 0.5),
+                  side: BorderSide(
+                    color: ThemeConfig.primaryColor.withValues(alpha: 0.3),
+                  ),
+                  onPressed: () =>
+                      _addField(label: template, type: _templateTypes[template]),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFieldRow(int index) {
+    final _FieldDraft draft = _fieldDrafts[index];
+    return Padding(
+      padding: const EdgeInsets.only(bottom: ThemeConfig.space12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: TextField(
+                  controller: draft.labelController,
+                  style: const TextStyle(color: ThemeConfig.textColor),
+                  onChanged: (_) {
+                    if (!_dirty) setState(() => _dirty = true);
+                  },
+                  decoration: const InputDecoration(
+                    hintText: '名称，如：安全码',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: ThemeConfig.space8),
+              DropdownButton<SecretFieldType>(
+                value: draft.type,
+                underline: const SizedBox.shrink(),
+                items: const <DropdownMenuItem<SecretFieldType>>[
+                  DropdownMenuItem(
+                    value: SecretFieldType.text,
+                    child: Icon(Icons.text_fields, size: 18),
+                  ),
+                  DropdownMenuItem(
+                    value: SecretFieldType.password,
+                    child: Icon(Icons.password, size: 18),
+                  ),
+                  DropdownMenuItem(
+                    value: SecretFieldType.tel,
+                    child: Icon(Icons.phone, size: 18),
+                  ),
+                  DropdownMenuItem(
+                    value: SecretFieldType.date,
+                    child: Icon(Icons.calendar_today, size: 18),
+                  ),
+                  DropdownMenuItem(
+                    value: SecretFieldType.number,
+                    child: Icon(Icons.pin, size: 18),
+                  ),
+                ],
+                onChanged: (SecretFieldType? v) {
+                  if (v == null) return;
+                  setState(() {
+                    draft.type = v;
+                    if (v == SecretFieldType.password) draft.protected = true;
+                    _dirty = true;
+                  });
+                },
+              ),
+              IconButton(
+                onPressed: () {
+                  setState(() {
+                    draft.protected = !draft.protected;
+                    _dirty = true;
+                  });
+                },
+                icon: Icon(
+                  draft.protected
+                      ? Icons.visibility_off_outlined
+                      : Icons.visibility_outlined,
+                  size: 18,
+                ),
+                color: draft.protected
+                    ? ThemeConfig.primaryColor
+                    : ThemeConfig.hintTextColor,
+                tooltip: draft.protected ? '默认掩码显示' : '明文显示',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              ),
+              IconButton(
+                onPressed: () {
+                  setState(() {
+                    _fieldDrafts.removeAt(index).dispose();
+                    _dirty = true;
+                  });
+                },
+                icon: const Icon(Icons.close, size: 18),
+                color: ThemeConfig.dangerColor,
+                tooltip: '删除该保密项',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              ),
+            ],
+          ),
+          const SizedBox(height: ThemeConfig.space4),
+          TextField(
+            controller: draft.valueController,
+            obscureText: draft.protected,
+            onChanged: (_) {
+              if (!_dirty) setState(() => _dirty = true);
+            },
+            style: const TextStyle(color: ThemeConfig.textColor),
+            decoration: InputDecoration(
+              hintText: '内容',
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+              suffixIcon: draft.protected
+                  ? PasswordVisibilityToggle(
+                      obscured: true,
+                      onToggle: () => setState(
+                        () => draft.protected = !draft.protected,
+                      ),
+                      iconSize: 20,
+                    )
+                  : null,
+            ),
+          ),
+        ],
+      ),
     );
   }
 

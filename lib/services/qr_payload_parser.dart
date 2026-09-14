@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'data_export_service.dart';
 import '../models/password_item.dart';
+import '../models/secret_field.dart';
 
 /// 二维码内容解析结果。
 sealed class QrParseResult {
@@ -72,6 +75,10 @@ class QrPayloadParser {
   }
 
   /// 解析 `keyring://item?<query>`。
+  ///
+  /// 可选 `fields` 参数：URL 编码的保密项 JSON 数组
+  /// （`[{"label":"安全码","value":"123","type":"password"}]`），
+  /// 便于从其它工具生成携带保密项的单条导入码。
   PasswordItem? _parseKeyringUri(String uri) {
     final int q = uri.indexOf('?');
     if (q < 0) return null;
@@ -82,12 +89,29 @@ class QrPayloadParser {
     // title 与 password 至少一个要有值，否则视为无效。
     if (title.isEmpty && password.isEmpty) return null;
 
+    List<SecretField>? fields;
+    final String? fieldsRaw = params['fields'];
+    if (fieldsRaw != null) {
+      try {
+        final dynamic decoded = jsonDecode(_decode(fieldsRaw));
+        if (decoded is List) {
+          fields = decoded
+              .whereType<Map>()
+              .map(SecretField.fromMap)
+              .toList();
+        }
+      } catch (_) {
+        // fields 参数坏数据：忽略，不影响其余字段导入。
+      }
+    }
+
     return PasswordItem(
       title: title,
       username: _decode(params['username'] ?? ''),
       password: password,
       url: params.containsKey('url') ? _decode(params['url']!) : null,
       notes: params.containsKey('notes') ? _decode(params['notes']!) : null,
+      customFields: fields,
     );
   }
 

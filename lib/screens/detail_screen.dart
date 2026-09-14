@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../models/item_group.dart';
 import '../models/password_item.dart';
+import '../models/secret_field.dart';
+import '../models/workspace.dart';
 import '../services/password_repository.dart';
 import '../utils/theme_config.dart';
 import '../widgets/shared/app_card.dart';
@@ -21,6 +24,10 @@ class DetailScreen extends StatefulWidget {
 
 class _DetailScreenState extends State<DetailScreen> {
   bool _obscurePassword = true;
+
+  /// 已点击显示的保密项 id（默认全部掩码）。
+  final Set<String> _revealedFieldIds = <String>{};
+
   // 编辑返回后刷新本页展示的数据（在 initState 中初始化）。
   late PasswordItem _current;
 
@@ -134,6 +141,10 @@ class _DetailScreenState extends State<DetailScreen> {
           _buildHeader(url),
           const SizedBox(height: ThemeConfig.space16),
           _buildBasicInfoCard(),
+          if (_current.customFields.isNotEmpty) ...<Widget>[
+            const SizedBox(height: ThemeConfig.space12),
+            _buildSecretFieldsCard(),
+          ],
           if (_current.notes != null && _current.notes!.isNotEmpty) ...<Widget>[
             const SizedBox(height: ThemeConfig.space12),
             _buildNotesCard(),
@@ -293,11 +304,106 @@ class _DetailScreenState extends State<DetailScreen> {
     );
   }
 
-  Widget _buildMetaCard() {
+  /// 保密项卡片：protected 项默认掩码，可显示/复制。
+  Widget _buildSecretFieldsCard() {
     return AppCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
+          const Text(
+            '保密项',
+            style: TextStyle(
+              color: ThemeConfig.hintTextColor,
+              fontSize: ThemeConfig.fontSizeBody,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: ThemeConfig.space4),
+          for (int i = 0; i < _current.customFields.length; i++) ...<Widget>[
+            if (i > 0) const Divider(),
+            _buildSecretFieldRow(_current.customFields[i]),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSecretFieldRow(SecretField field) {
+    final bool revealed = _revealedFieldIds.contains(field.id);
+    final bool masked = field.protected && !revealed;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: ThemeConfig.space8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: <Widget>[
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 110),
+            child: Text(
+              field.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: ThemeConfig.textColor,
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          const SizedBox(width: ThemeConfig.space12),
+          Expanded(
+            child: Text(
+              masked
+                  ? '•' * (field.value.length.clamp(6, 12))
+                  : field.value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: ThemeConfig.textColor,
+                fontSize: 15,
+                letterSpacing: masked ? 2.0 : 0.0,
+              ),
+            ),
+          ),
+          if (field.protected)
+            PasswordVisibilityToggle(
+              obscured: masked,
+              onToggle: () => setState(() {
+                if (revealed) {
+                  _revealedFieldIds.remove(field.id);
+                } else {
+                  _revealedFieldIds.add(field.id);
+                }
+              }),
+            ),
+          CopyButton(text: field.value, label: field.label, iconSize: 17),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMetaCard() {
+    final Workspace? workspace = widget.repository.workspacesNotifier.value
+        .where((Workspace w) => w.id == _current.workspaceId)
+        .firstOrNull;
+    final ItemGroup? group = _current.groupId == null
+        ? null
+        : widget.repository.groupsNotifier.value
+              .where((ItemGroup g) => g.id == _current.groupId)
+              .firstOrNull;
+
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          _buildFieldRow(
+            label: '归属',
+            value: <String>[
+              if (workspace != null) '${workspace.icon ?? ''} ${workspace.name}'.trim(),
+              if (group != null) group.name,
+            ].join(' · '),
+          ),
+          const Divider(),
           _buildFieldRow(
             label: '创建时间',
             value: _formatDateTime(_current.createdAt),

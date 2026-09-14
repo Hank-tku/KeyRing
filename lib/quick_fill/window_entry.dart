@@ -35,19 +35,23 @@ class QuickFillWindowApp extends StatelessWidget {
 }
 
 class _Entry {
-  const _Entry(this.id, this.title, this.username, this.url);
+  const _Entry(this.id, this.title, this.username, this.url, this.workspace);
 
   factory _Entry.fromJson(Map<String, dynamic> json) => _Entry(
         json['id'] as String? ?? '',
         json['title'] as String? ?? '',
         json['username'] as String? ?? '',
         json['url'] as String? ?? '',
+        json['workspace'] as String? ?? '',
       );
 
   final String id;
   final String title;
   final String username;
   final String url;
+
+  /// 所属工作区名（多个工作区时便于区分；桌面端只有全同步工作区）。
+  final String workspace;
 }
 
 class QuickFillWindowPage extends StatefulWidget {
@@ -481,6 +485,24 @@ class _EntryTile extends StatelessWidget {
                     ],
                   ),
                 ),
+                if (entry.workspace.isNotEmpty) ...<Widget>[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: ThemeConfig.primarySoft,
+                      borderRadius: BorderRadius.circular(ThemeConfig.radiusSm),
+                    ),
+                    child: Text(
+                      entry.workspace,
+                      style: const TextStyle(
+                        color: ThemeConfig.primaryColor,
+                        fontSize: 10.5,
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
