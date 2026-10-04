@@ -1,196 +1,257 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/services.dart';
-
-import '../models/password_item.dart';
+import '../screens/auth_service.dart';
+import '../services/app_lock_state.dart';
 import '../services/foreground_app_service.dart';
 import '../services/keyboard_inject_service.dart';
 import '../services/password_repository.dart';
+import '../services/workspace_access_service.dart';
 
-/// 快速填充小窗的宿主（运行在主窗口 isolate）。
-///
-/// 职责：
-/// - 创建/显示/隐藏子窗口（toggle）；呼起时先激活本应用抢键盘焦点，
-///   并把面板定位到鼠标光标处
-/// - 通道架构（desktop_multi_window 0.3.0，unidirectional 模式下
-///   一条通道只允许一个引擎注册 handler）：
-///   - controller 通道 `mixin.one/window_controller/$windowId`：宿主注册
-///     handler，接收子窗口的 requestItems / fill / panelHidden
-///   - 命令通道 `keyring.quickfill/cmd`：子窗口注册 handler，
-///     宿主推送 refresh / feedback / hide
-/// - 呼起时记住前台应用（填充目标），每次呼起都刷新条目
-/// - 填充失败时把原因带回面板重新显示（用户在别的应用里也能看到）
-///
-/// 安全：密码不经过子窗口；注入由主窗口执行后立即丢弃引用；
-/// 前台是 KeyRing 自己（或记不到目标）时直接取消填充，绝不盲打。
+/// Main-isolate host. Only the dedicated panel is shown. Password values stay in
+/// this isolate; every fill rechecks application and workspace authorization.
 class QuickFillHost {
-  QuickFillHost({required this.repository, required this.onFeedback});
-
+  QuickFillHost({
+    required this.repository,
+    required this.onFeedback,
+    this.onVisibilityChanged,
+  }) {
+    AppLockState.listenable.addListener(_accessChanged);
+    repository.access.addListener(_accessChanged);
+  }
   final PasswordRepository repository;
-
-  /// 填充结果反馈（成功/失败提示，由宿主侧记录日志）。
-  final void Function(String message, bool success) onFeedback;
-
-  /// 宿主 → 面板命令通道（handler 在子窗口引擎侧注册）。
-  static const WindowMethodChannel _cmdChannel = WindowMethodChannel(
+  final void Function(bool)? onVisibilityChanged;
+  final void Function(String, bool) onFeedback;
+  static const _cmdChannel = WindowMethodChannel(
     'keyring.quickfill/cmd',
     mode: ChannelMode.unidirectional,
   );
-
   WindowController? _window;
   bool _visible = false;
   bool _filling = false;
-
-  /// 本次呼起是否记录到了有效的填充目标（非 KeyRing 自身）。
+  bool _opening = false;
+  bool _authenticating = false;
   bool _hasTarget = false;
-
+  int _session = 0;
   bool get isVisible => _visible;
 
-  /// 热键/托盘入口：切换小窗显隐。
-  ///
-  /// 显示前先记住当前前台应用（填充后切回）。
+  void _accessChanged() {
+    if (_visible) unawaited(_push('refresh'));
+  }
+
   Future<void> toggle() async {
+    if (_opening || _authenticating) return;
     if (_visible) {
-      await hide();
-      return;
+      await hide(restoreTarget: true);
+    } else {
+      await show();
     }
-    await show();
+  }
+
+  Future<void> _showPanel() async {
+    if (Platform.isMacOS) {
+      await ForegroundAppService.showPanel();
+    } else {
+      await _window?.show();
+    }
   }
 
   Future<void> show() async {
-    _hasTarget = await ForegroundAppService.remember();
-
-    WindowController? window = _window;
-    final bool firstLaunch = window == null;
-    if (window == null) {
-      window = await WindowController.create(
-        const WindowConfiguration(
-          arguments: 'quick_fill',
-          hiddenAtLaunch: true,
-        ),
-      );
-      _window = window;
-      await window.setWindowMethodHandler(_onWindowCall);
-    }
-    // 先激活本应用再显示面板：后台 app 的窗口无法直接获得键盘焦点。
-    await ForegroundAppService.activateSelf();
-    // 面板中心对齐到鼠标光标（每次呼起都重新定位，夹在屏幕可视区内）。
-    await ForegroundAppService.centerPanelAtMouse();
-    await window.show();
-    _visible = true;
-    // 首次创建时子引擎 _boot 会自己拉取；之后每次呼起都刷新，
-    // 保证主窗口的增删改立即反映到面板。
-    if (!firstLaunch) {
-      unawaited(_pushToPanel('refresh'));
+    if (_opening) return;
+    _opening = true;
+    _session++;
+    try {
+      _hasTarget = await ForegroundAppService.remember();
+      if (_window == null) {
+        _window = await WindowController.create(
+          const WindowConfiguration(
+            arguments: 'quick_fill',
+            hiddenAtLaunch: true,
+          ),
+        );
+        await _window!.setWindowMethodHandler(_onWindowCall);
+      }
+      _visible = true;
+      onVisibilityChanged?.call(true);
+      await _push('refresh');
+      await _showPanel();
+    } catch (_) {
+      _visible = false;
+      onVisibilityChanged?.call(false);
+      rethrow;
+    } finally {
+      _opening = false;
     }
   }
 
-  Future<void> hide() async {
-    await _window?.hide();
+  Future<void> hide({bool restoreTarget = false}) async {
+    _session++;
     _visible = false;
+    onVisibilityChanged?.call(false);
+    if (Platform.isMacOS) {
+      await ForegroundAppService.hidePanel();
+    } else {
+      await _window?.hide();
+    }
+    if (restoreTarget && _hasTarget) await ForegroundAppService.activate();
   }
 
   Future<void> dispose() async {
-    // 0.3.0 没有 close API：隐藏即可，进程退出时一并销毁。
-    await _window?.hide();
-    _visible = false;
+    AppLockState.listenable.removeListener(_accessChanged);
+    repository.access.removeListener(_accessChanged);
+    if (_window != null) await hide();
+  }
+
+  Future<void> _push(String method, [dynamic args]) async {
+    try {
+      await _cmdChannel.invokeMethod<dynamic>(method, args);
+    } catch (_) {}
   }
 
   Future<dynamic> _onWindowCall(MethodCall call) async {
     switch (call.method) {
       case 'requestItems':
-        // 脱敏：不含密码。按既有序（收藏优先、更新时间倒序）。
-        final List<Map<String, String>> payload = <Map<String, String>>[
-          for (final PasswordItem it in repository.itemsNotifier.value)
-            <String, String>{
-              'id': it.id,
-              'title': it.title,
-              'username': it.username,
-              'url': it.url ?? '',
-            },
-        ];
-        return jsonEncode(payload);
+        final locked = AppLockState.isLocked;
+        final workspaces = repository.workspacesNotifier.value;
+        return jsonEncode({
+          'locked': locked,
+          'workspaces': locked
+              ? []
+              : [
+                  for (final w in workspaces)
+                    if (!repository.access.canAccess(w.id))
+                      {
+                        'id': w.id,
+                        'name': w.name,
+                        'mode': repository.access.modeFor(w.id).name,
+                      },
+                ],
+          'items': locked
+              ? []
+              : [
+                  for (final item in repository.itemsNotifier.value)
+                    if (repository.access.canAccess(item.workspaceId))
+                      {
+                        'id': item.id,
+                        'title': item.title,
+                        'username': item.username,
+                        'url': item.url ?? '',
+                        'workspace':
+                            workspaces
+                                .where((w) => w.id == item.workspaceId)
+                                .firstOrNull
+                                ?.name ??
+                            '',
+                      },
+                ],
+        });
+      case 'unlockApp':
+        if (_authenticating) return false;
+        _authenticating = true;
+        final session = _session;
+        final generation = repository.access.generation;
+        try {
+          await ForegroundAppService.setPanelAuthenticating(true);
+          final ok = await AuthService().authenticateWithSystemPassword();
+          if (ok &&
+              session == _session &&
+              generation == repository.access.generation &&
+              _visible) {
+            AppLockState.markUnlocked();
+          }
+          if (_visible) await _showPanel();
+          return !AppLockState.isLocked;
+        } finally {
+          _authenticating = false;
+          await ForegroundAppService.setPanelAuthenticating(false);
+        }
+      case 'unlockWorkspace':
+        if (AppLockState.isLocked || !_visible) return false;
+        final args = Map<String, dynamic>.from(call.arguments as Map);
+        final session = _session;
+        final id = args['id'] as String;
+        final isSystem =
+            repository.access.modeFor(id) == WorkspaceUnlockMode.system;
+        bool current() =>
+            session == _session && _visible && !AppLockState.isLocked;
+        if (isSystem) {
+          _authenticating = true;
+          await ForegroundAppService.setPanelAuthenticating(true);
+        }
+        try {
+          return isSystem
+              ? await repository.access.verifySystem(id, isCurrent: current)
+              : await repository.access.verify(
+                  id,
+                  args['password'] as String? ?? '',
+                  isCurrent: current,
+                );
+        } finally {
+          if (isSystem) {
+            if (_visible) await _showPanel();
+            _authenticating = false;
+            await ForegroundAppService.setPanelAuthenticating(false);
+          }
+        }
+      case 'cancelWorkspaceUnlock':
+        repository.access.lock(call.arguments as String);
+        return null;
       case 'fill':
-        final String? id = call.arguments as String?;
-        if (id != null) {
-          // 不阻塞子窗口：填充要等切换应用+注入（最长 2 秒+），
-          // 面板应立即隐藏，失败时再通过 feedback 带回。
+        final id = call.arguments as String?;
+        if (id != null && !_filling) {
+          await hide();
           unawaited(_fill(id));
         }
         return null;
       case 'panelHidden':
-        // 面板自己隐藏（Esc/失焦/选中后）：同步显隐状态，
-        // 下次热键才能正确 toggle。
-        _visible = false;
+        if (!_authenticating) await hide(restoreTarget: call.arguments == true);
         return null;
       default:
         return null;
     }
   }
 
-  Future<void> _pushToPanel(String method, [dynamic arguments]) async {
-    try {
-      await _cmdChannel.invokeMethod<dynamic>(method, arguments);
-    } catch (_) {
-      // 子引擎尚未就绪/已关闭：忽略。
-    }
-  }
-
-  /// 填充失败时把错误带回面板：重新显示并提示原因（面板是最自然的
-  /// 反馈面，用户按下热键的地方），不再静默吞掉。
   Future<void> _notifyPanelError(String message) async {
     _visible = true;
-    await ForegroundAppService.activateSelf();
-    await _window?.show();
-    unawaited(
-      _pushToPanel('feedback', <String, dynamic>{'message': message, 'ok': false}),
-    );
+    onVisibilityChanged?.call(true);
+    await _showPanel();
+    await _push('refresh');
+    await _push('feedback', {'message': message, 'ok': false});
   }
 
   Future<void> _fill(String id) async {
     if (_filling) return;
     _filling = true;
+    final generation = repository.access.generation;
     try {
-      final PasswordItem? item =
-          await repository.getByIdAsync(id);
-      if (item == null) {
-        onFeedback('条目不存在', false);
-        await _notifyPanelError('条目不存在，可能刚被删除');
+      final item = await repository.getByIdAsync(id);
+      if (item == null ||
+          AppLockState.isLocked ||
+          !repository.access.canAccess(item.workspaceId)) {
+        await _notifyPanelError('请先解锁对应工作区');
         return;
       }
-      if (!_hasTarget) {
-        onFeedback('填充取消：没有可用的目标应用', false);
-        await _notifyPanelError('无法确定填充目标：请在目标应用里按热键唤起后再试');
+      if (!_hasTarget || !await ForegroundAppService.activate()) {
+        await _notifyPanelError('无法返回目标应用，请在目标输入框中重新按快捷键');
         return;
       }
-
-      // 切回热键按下时的应用；失败则给用户手动切换的时间。
-      final bool switched = await ForegroundAppService.activate();
-      if (!switched) {
-        await Future<void>.delayed(const Duration(milliseconds: 1800));
-      } else {
-        // 等目标应用接住焦点。
-        await Future<void>.delayed(const Duration(milliseconds: 450));
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      if (generation != repository.access.generation ||
+          AppLockState.isLocked ||
+          !repository.access.canAccess(item.workspaceId) ||
+          !await ForegroundAppService.isTargetActive()) {
+        return;
       }
-
-      final bool ok = await KeyboardInjectService.typeCredentials(
+      final ok = await KeyboardInjectService.typeCredentials(
         username: item.username,
         password: item.password,
       );
-      onFeedback(
-        ok ? '已填充「${item.title}」' : '填充失败：请检查辅助功能权限',
-        ok,
-      );
-      if (!ok) {
-        await _notifyPanelError(
-          Platform.isMacOS
-              ? '填充失败：请在 系统设置 → 隐私与安全性 → 辅助功能 中授权 KeyRing'
-              : '填充失败：模拟键盘输入不可用',
-        );
-      }
+      onFeedback(ok ? '已填充' : '填充失败', ok);
+      if (!ok) await _notifyPanelError('填充失败，请检查系统辅助功能权限');
+    } catch (_) {
+      await _notifyPanelError('填充失败，请重新选择目标输入框');
     } finally {
       _filling = false;
     }

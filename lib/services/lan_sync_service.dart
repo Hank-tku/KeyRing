@@ -1,3 +1,4 @@
+import 'app_lock_state.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
@@ -5,7 +6,10 @@ import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 
+import '../models/item_group.dart';
 import '../models/password_item.dart';
+import '../models/tombstone.dart';
+import '../models/workspace.dart';
 import '../services/password_repository.dart';
 import '../services/vault_metadata_service.dart';
 import 'device_service.dart';
@@ -15,7 +19,6 @@ import 'lan/connection_state_manager.dart';
 import 'lan/web_socket_manager.dart';
 import 'lan/verification_manager.dart';
 import 'lan/service_discovery_manager.dart';
-import 'lan/sync_conflict_resolver.dart';
 import 'lan/sync_protocol_codec.dart';
 
 class LanSyncService {
@@ -31,11 +34,12 @@ class LanSyncService {
   final VerificationManager _verificationManager;
   final ServiceDiscoveryManager _discoveryManager;
   final VaultMetadataService _metadataService;
-  final SyncConflictResolver _conflictResolver;
   final SyncProtocolCodec _protocolCodec;
 
   final Map<String, String> _activeVerificationCodes = {};
   final Map<String, bool> _verifiedPeers = {};
+  // hello 协商出的对端能力（v2 对端）；v1 旧端不入表（发送时走降级路径）。
+  final Map<String, PeerCapabilities> _peerCaps = <String, PeerCapabilities>{};
   Function()? _onSyncSuccess;
   Function(String message)? _onCompatibilityWarning;
   Completer<void>? _serverSyncCompleter;
@@ -45,6 +49,7 @@ class LanSyncService {
   HttpServer? _server;
   String? _deviceId;
   String? _deviceName;
+  String _deviceClass = 'mobile';
   int _port = 0;
 
   // Callbacks
@@ -56,7 +61,6 @@ class LanSyncService {
       _verificationManager = VerificationManager(ConnectionStateManager()),
       _discoveryManager = ServiceDiscoveryManager(),
       _metadataService = VaultMetadataService(),
-      _conflictResolver = SyncConflictResolver(),
       _protocolCodec = SyncProtocolCodec() {
     // Initialize connection manager with the state manager
     _connectionManager = WebSocketConnectionManager();
@@ -75,6 +79,7 @@ class LanSyncService {
           ? 'zzzz-$storedDeviceId'
           : storedDeviceId;
       _deviceName ??= await deviceService.getOrCreateDeviceName();
+      _deviceClass = deviceService.getDeviceClass();
       // Start HTTP server for WebSocket signaling if not already started
       if (_server == null) {
         _server = await HttpServer.bind(
@@ -203,6 +208,20 @@ class LanSyncService {
       return;
     }
 
+    // 记录对端能力，随后回敬本端 hello（v1 旧端会忽略该消息）。
+    final PeerCapabilities? caps = _protocolCodec.readHelloCapabilities(data);
+    if (caps != null) {
+      _peerCaps[peerId] = caps;
+    }
+    _connectionManager.sendMessage(
+      peerId,
+      _protocolCodec.hello(
+        deviceId: _deviceId,
+        deviceName: _deviceName,
+        deviceClass: _deviceClass,
+      ),
+    );
+
     // 服务端：消息处理-生成验证码
     final String code = _generateVerificationCode();
     _activeVerificationCodes[peerId] = code;
@@ -259,13 +278,10 @@ class LanSyncService {
       return;
     }
 
-    // 获取本地数据并发送
+    // 按对端能力过滤后发送（选择性同步的核心路径）。
     _connectionManager.sendMessage(
       peerId,
-      _protocolCodec.syncData(
-        items: repository.itemsNotifier.value,
-        vaultVersion: (await _metadataService.load()).vaultVersion,
-      ),
+      await _buildOutgoingSyncData(peerId),
     );
   }
 
@@ -275,17 +291,96 @@ class LanSyncService {
     }
 
     final SyncDataPayload payload = _protocolCodec.readSyncData(data);
-
-    if (payload.isLegacyPeer) {
-      _legacyPeerDetected = true;
-      _onCompatibilityWarning?.call('对方版本较旧，建议升级后同步，避免冲突判断不准确。');
-    }
-
-    for (final PasswordItem remote in payload.items) {
-      await _syncItemByTimestamp(remote);
-    }
+    await _applyIncomingSyncData(payload);
 
     _completeServerSync();
+  }
+
+  /// 组装发给指定对端的 sync_data（发送侧过滤，设计文档 §5.2）。
+  ///
+  /// - v1 旧端：剥离 v2 新键，退回纯条目同步；
+  /// - v2 对端：只发送对端可见工作区的条目与结构定义（桌面端收不到
+  ///   mobileOnly 工作区的任何痕迹，连名称都没有）；墓碑按 scope 过滤。
+  Future<Map<String, dynamic>> _buildOutgoingSyncData(String peerId) async {
+    final int vaultVersion = (await _metadataService.load()).vaultVersion;
+    final generation = repository.access.generation;
+    final PeerCapabilities? caps = _peerCaps[peerId];
+    final List<PasswordItem> allItems = repository.itemsNotifier.value
+        .where((item) => !AppLockState.isLocked && repository.access.canAccess(item.workspaceId))
+        .toList();
+
+    if (caps == null) {
+      return _protocolCodec.syncData(
+        itemMaps: allItems
+            .where((item) => repository.workspacesNotifier.value.any((w) => w.id == item.workspaceId && w.syncPolicy == SyncPolicy.full))
+            .map((PasswordItem item) => item.toLegacyMap())
+            .toList(),
+        deviceClass: _deviceClass,
+        vaultVersion: vaultVersion,
+      );
+    }
+
+    final String peerClass = caps.deviceClass;
+    final List<Workspace> visibleWorkspaces = repository
+        .workspacesNotifier
+        .value
+        .where(
+          (Workspace w) =>
+              !AppLockState.isLocked && w.syncPolicy.visibleTo(peerClass) &&
+              repository.access.canAccess(w.id),
+        )
+        .toList();
+    final Set<String> visibleWorkspaceIds = visibleWorkspaces
+        .map((Workspace w) => w.id)
+        .toSet();
+    final List<Map<String, dynamic>> itemMaps = allItems
+        .where(
+          (PasswordItem item) => visibleWorkspaceIds.contains(item.workspaceId),
+        )
+        .map((PasswordItem item) => item.toMap())
+        .toList();
+    final List<Tombstone> tombstones = await repository.tombstonesFor(
+      peerClass,
+    );
+
+    if (generation != repository.access.generation || AppLockState.isLocked) {
+      return _protocolCodec.syncData(itemMaps: [], deviceClass: _deviceClass, vaultVersion: vaultVersion);
+    }
+
+    return _protocolCodec.syncData(
+      itemMaps: itemMaps,
+      workspaceMaps: visibleWorkspaces.map((Workspace w) => w.toMap()).toList(),
+      groupMaps: repository.groupsNotifier.value
+          .where((ItemGroup g) => visibleWorkspaceIds.contains(g.workspaceId))
+          .map((ItemGroup g) => g.toMap())
+          .toList(),
+      tombstoneMaps: tombstones.map((Tombstone t) => t.toMap()).toList(),
+      deviceClass: _deviceClass,
+      vaultVersion: vaultVersion,
+    );
+  }
+
+  /// 应用对端发来的 sync_data（接收侧防御 + 字段保留合并 + 墓碑，
+  /// 全部逻辑收敛在 repository.applyIncoming，设计文档 §5.3-§5.5）。
+  Future<void> _applyIncomingSyncData(SyncDataPayload payload) async {
+    if (payload.isLegacyPeer) {
+      _legacyPeerDetected = true;
+      _onCompatibilityWarning?.call(
+        '对方为旧版本：条目仍可同步，但工作区、分组、保密项与删除不会同步，'
+        '也没有「仅移动端」保护。建议对方升级到最新版。',
+      );
+    }
+    await repository.applyIncoming(
+      rawItems: payload.itemMaps,
+      rawWorkspaces: payload.workspaces
+          .map((Workspace w) => w.toMap())
+          .toList(),
+      rawGroups: payload.groups.map((ItemGroup g) => g.toMap()).toList(),
+      rawTombstones: payload.tombstones
+          .map((Tombstone t) => t.toMap())
+          .toList(),
+      localDeviceClass: _deviceClass,
+    );
   }
 
   void _completeServerSync() {
@@ -304,23 +399,6 @@ class LanSyncService {
     }
   }
 
-  Future<void> _syncItemByTimestamp(PasswordItem remote) async {
-    final List<PasswordItem> localItems = repository.itemsNotifier.value;
-    final PasswordItem? local = _conflictResolver.findLocal(
-      localItems,
-      remote.id,
-    );
-
-    switch (_conflictResolver.resolve(remote: remote, local: local)) {
-      case SyncResolution.add:
-      case SyncResolution.update:
-        await repository.upsertPreserveTimestamps(remote);
-        break;
-      case SyncResolution.skip:
-        break;
-    }
-  }
-
   String _generateVerificationCode() {
     final Random random = Random.secure();
     return (100000 + random.nextInt(900000)).toString();
@@ -330,6 +408,7 @@ class LanSyncService {
     await _connectionManager.closeAllConnections();
     _activeVerificationCodes.clear();
     _verifiedPeers.clear();
+    _peerCaps.clear();
   }
 
   Future<void> resetServer() async {
@@ -566,7 +645,11 @@ class LanSyncService {
       // 发送hello消息开始握手
       _connectionManager.sendMessage(
         peer.id,
-        _protocolCodec.hello(deviceId: _deviceId, deviceName: _deviceName),
+        _protocolCodec.hello(
+          deviceId: _deviceId,
+          deviceName: _deviceName,
+          deviceClass: _deviceClass,
+        ),
       );
 
       // 创建手动控制的定时器来处理验证超时
@@ -634,14 +717,11 @@ class LanSyncService {
     // 请求对端数据
     _connectionManager.sendMessage(peerId, _protocolCodec.syncRequest());
     await Future.delayed(const Duration(seconds: 1));
-    // 发送本地数据
+    // 发送本地数据（按对端能力过滤后的）
     debugPrint('向服务端发送 sync_data');
     _connectionManager.sendMessage(
       peerId,
-      _protocolCodec.syncData(
-        items: repository.itemsNotifier.value,
-        vaultVersion: (await _metadataService.load()).vaultVersion,
-      ),
+      await _buildOutgoingSyncData(peerId),
     );
   }
 
@@ -656,6 +736,16 @@ class LanSyncService {
     try {
       final String type = _protocolCodec.messageType(data);
       switch (type) {
+        case SyncMessageType.hello:
+          // 服务端回敬的 hello：记录对端能力（v2），供后续发送过滤使用。
+          final PeerCapabilities? caps = _protocolCodec.readHelloCapabilities(
+            data,
+          );
+          if (caps != null) {
+            _peerCaps[peer.id] = caps;
+          }
+          break;
+
         case SyncMessageType.verifyRequest:
           final String? code = data['code'] as String?;
           if (code != null) {

@@ -1,13 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../models/item_group.dart';
 import '../models/password_item.dart';
+import '../models/secret_field.dart';
+import '../models/workspace.dart';
 import '../services/password_repository.dart';
 import '../utils/theme_config.dart';
 import '../widgets/shared/app_card.dart';
 import '../widgets/shared/copy_button.dart';
 import '../widgets/shared/password_visibility_toggle.dart';
 import 'edit_item_screen.dart';
+import '../widgets/shared/workspace_guard.dart';
 
 class DetailScreen extends StatefulWidget {
   const DetailScreen({super.key, required this.item, required this.repository});
@@ -21,6 +25,10 @@ class DetailScreen extends StatefulWidget {
 
 class _DetailScreenState extends State<DetailScreen> {
   bool _obscurePassword = true;
+
+  /// 已点击显示的保密项 id（默认全部掩码）。
+  final Set<String> _revealedFieldIds = <String>{};
+
   // 编辑返回后刷新本页展示的数据（在 initState 中初始化）。
   late PasswordItem _current;
 
@@ -31,6 +39,14 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   Future<void> _edit() async {
+    if (!await authorizeWorkspace(
+          context,
+          widget.repository,
+          _current.workspaceId,
+        ) ||
+        !mounted) {
+      return;
+    }
     final bool? changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
         builder: (BuildContext context) =>
@@ -39,17 +55,29 @@ class _DetailScreenState extends State<DetailScreen> {
     );
     if (changed != true || !mounted) return;
     // 编辑后从仓库取最新值刷新本页。
-    final PasswordItem? fresh =
-        await widget.repository.getByIdAsync(_current.id);
+    final PasswordItem? fresh = await widget.repository.getByIdAsync(
+      _current.id,
+    );
     if (!mounted) return;
     if (fresh != null) {
-      setState(() => _current = fresh);
+      setState(() {
+        _current = fresh;
+        _obscurePassword = true;
+        _revealedFieldIds.clear();
+      });
     }
-    // 通知主页本条目已变更（主页刷新列表）。
-    Navigator.of(context).pop(true);
+    // 首页监听仓库通知；保存后保持详情页打开。
   }
 
   Future<void> _delete() async {
+    if (!await authorizeWorkspace(
+          context,
+          widget.repository,
+          _current.workspaceId,
+        ) ||
+        !mounted) {
+      return;
+    }
     final bool? confirm = await showDialog<bool>(
       context: context,
       builder: (BuildContext context) => AlertDialog(
@@ -62,7 +90,9 @@ class _DetailScreenState extends State<DetailScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(foregroundColor: ThemeConfig.dangerColor),
+            style: TextButton.styleFrom(
+              foregroundColor: ThemeConfig.dangerColor,
+            ),
             child: const Text('删除'),
           ),
         ],
@@ -77,9 +107,9 @@ class _DetailScreenState extends State<DetailScreen> {
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('删除失败: $e')),
-          );
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('删除失败: $e')));
         }
       }
     }
@@ -104,8 +134,9 @@ class _DetailScreenState extends State<DetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final String? url =
-        (_current.url != null && _current.url!.isNotEmpty) ? _current.url : null;
+    final String? url = (_current.url != null && _current.url!.isNotEmpty)
+        ? _current.url
+        : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -128,28 +159,37 @@ class _DetailScreenState extends State<DetailScreen> {
           ),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(ThemeConfig.space16),
-        children: <Widget>[
-          _buildHeader(url),
-          const SizedBox(height: ThemeConfig.space16),
-          _buildBasicInfoCard(),
-          if (_current.notes != null && _current.notes!.isNotEmpty) ...<Widget>[
+      body: WorkspaceGuard(
+        repository: widget.repository,
+        workspaceId: _current.workspaceId,
+        child: ListView(
+          padding: const EdgeInsets.all(ThemeConfig.space16),
+          children: <Widget>[
+            _buildHeader(url),
+            const SizedBox(height: ThemeConfig.space16),
+            _buildBasicInfoCard(),
+            if (_current.customFields.isNotEmpty) ...<Widget>[
+              const SizedBox(height: ThemeConfig.space12),
+              _buildSecretFieldsCard(),
+            ],
+            ...<Widget>[
+              const SizedBox(height: ThemeConfig.space12),
+              _buildNotesCard(),
+            ],
             const SizedBox(height: ThemeConfig.space12),
-            _buildNotesCard(),
+            _buildMetaCard(),
+            const SizedBox(height: ThemeConfig.space24),
           ],
-          const SizedBox(height: ThemeConfig.space12),
-          _buildMetaCard(),
-          const SizedBox(height: ThemeConfig.space24),
-        ],
+        ),
       ),
     );
   }
 
   /// 顶部头像区：首字母圆形 + 标题 + 网址来源 + 收藏 bookmark。
   Widget _buildHeader(String? url) {
-    final String initial =
-        _current.title.isNotEmpty ? _current.title.characters.first.toUpperCase() : '?';
+    final String initial = _current.title.isNotEmpty
+        ? _current.title.characters.first.toUpperCase()
+        : '?';
     return AppCard(
       child: Row(
         children: <Widget>[
@@ -211,11 +251,7 @@ class _DetailScreenState extends State<DetailScreen> {
             ),
           ),
           if (_current.isFavorite)
-            Icon(
-              Icons.bookmark,
-              color: ThemeConfig.favoriteColor,
-              size: 22,
-            ),
+            Icon(Icons.bookmark, color: ThemeConfig.favoriteColor, size: 22),
         ],
       ),
     );
@@ -223,8 +259,7 @@ class _DetailScreenState extends State<DetailScreen> {
 
   Widget _buildBasicInfoCard() {
     final bool hasUsername = _current.username.isNotEmpty;
-    final bool hasUrl =
-        _current.url != null && _current.url!.isNotEmpty;
+    final bool hasUrl = _current.url != null && _current.url!.isNotEmpty;
 
     return AppCard(
       child: Column(
@@ -240,14 +275,14 @@ class _DetailScreenState extends State<DetailScreen> {
           ),
           const Divider(),
           _buildPasswordRow(),
-          if (hasUrl) ...<Widget>[
+          ...<Widget>[
             const Divider(),
             _buildFieldRow(
               label: '网址',
               value: hasUrl ? _current.url : null,
               emptyText: '未设置',
               showCopy: hasUrl,
-              copyText: _current.url!,
+              copyText: _current.url ?? '',
               copyLabel: '网址',
             ),
           ],
@@ -273,15 +308,15 @@ class _DetailScreenState extends State<DetailScreen> {
               ),
               const Spacer(),
               CopyButton(
-                text: _current.notes!,
+                text: _current.notes ?? '',
                 label: '备注',
                 showLabel: true,
               ),
             ],
           ),
           const SizedBox(height: ThemeConfig.space8),
-          Text(
-            _current.notes!,
+          SelectableText(
+            _current.notes?.isNotEmpty == true ? _current.notes! : '未填写',
             style: const TextStyle(
               color: ThemeConfig.textColor,
               fontSize: ThemeConfig.fontSizeBody,
@@ -293,11 +328,106 @@ class _DetailScreenState extends State<DetailScreen> {
     );
   }
 
-  Widget _buildMetaCard() {
+  /// 保密项卡片：protected 项默认掩码，可显示/复制。
+  Widget _buildSecretFieldsCard() {
     return AppCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
+          const Text(
+            '保密项',
+            style: TextStyle(
+              color: ThemeConfig.hintTextColor,
+              fontSize: ThemeConfig.fontSizeBody,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: ThemeConfig.space4),
+          for (int i = 0; i < _current.customFields.length; i++) ...<Widget>[
+            if (i > 0) const Divider(),
+            _buildSecretFieldRow(_current.customFields[i]),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSecretFieldRow(SecretField field) {
+    final bool revealed = _revealedFieldIds.contains(field.id);
+    final bool isSecret = field.protected || field.type == SecretFieldType.password;
+    final bool masked = isSecret && !revealed;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: ThemeConfig.space8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: <Widget>[
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 110),
+            child: Text(
+              field.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: ThemeConfig.textColor,
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          const SizedBox(width: ThemeConfig.space12),
+          Expanded(
+            child: Text(
+              masked ? '•' * (field.value.length.clamp(6, 12)) : field.value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: ThemeConfig.textColor,
+                fontSize: 15,
+                letterSpacing: masked ? 2.0 : 0.0,
+              ),
+            ),
+          ),
+          if (isSecret)
+            PasswordVisibilityToggle(
+              obscured: masked,
+              onToggle: () => setState(() {
+                if (revealed) {
+                  _revealedFieldIds.remove(field.id);
+                } else {
+                  _revealedFieldIds.add(field.id);
+                }
+              }),
+            ),
+          CopyButton(text: field.value, label: field.label, iconSize: 17),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMetaCard() {
+    final Workspace? workspace = widget.repository.workspacesNotifier.value
+        .where((Workspace w) => w.id == _current.workspaceId)
+        .firstOrNull;
+    final ItemGroup? group = _current.groupId == null
+        ? null
+        : widget.repository.groupsNotifier.value
+              .where((ItemGroup g) => g.id == _current.groupId)
+              .firstOrNull;
+
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          _buildFieldRow(
+            label: '归属',
+            value: <String>[
+              if (workspace != null)
+                '${workspace.icon ?? ''} ${workspace.name}'.trim(),
+              if (group != null) group.name,
+            ].join(' · '),
+          ),
+          const Divider(),
           _buildFieldRow(
             label: '创建时间',
             value: _formatDateTime(_current.createdAt),
@@ -341,10 +471,8 @@ class _DetailScreenState extends State<DetailScreen> {
           ),
           const SizedBox(width: ThemeConfig.space12),
           Expanded(
-            child: Text(
+            child: SelectableText(
               display,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: isEmpty
                     ? ThemeConfig.hintTextColor

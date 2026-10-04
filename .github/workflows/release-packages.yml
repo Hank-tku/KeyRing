@@ -4,101 +4,90 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to upload assets to, for example v0.1.1
+        description: Release tag matching pubspec.yaml, for example v0.1.6
         required: true
-        default: v0.1.1
+      publish:
+        description: Publish after all platform builds succeed
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: 3.47.2
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
-  # 前置 job：先创建 release，其余 job 上传 asset 时 release 必然已存在，
-  # 避免"最早跑完的 job 撞上 release 未创建导致静默不上传"。
-  create-release:
-    name: Create release
+  validate:
+    name: Analyze and test
     runs-on: ubuntu-latest
     steps:
-      - name: Create draft release if missing
-        uses: softprops/action-gh-release@v2
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: ${{ github.event.inputs.tag || github.ref_name }}
-          generate_release_notes: true
-          draft: false
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Check release version and notes
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          VERSION=$(sed -n 's/^version: \([^+]*\).*/\1/p' pubspec.yaml)
+          test "$RELEASE_TAG" = "v$VERSION"
+          test -s "docs/releases/$RELEASE_TAG.md"
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter analyze
+      - run: flutter test
 
   windows:
     name: Windows zip
     runs-on: windows-latest
-    needs: create-release
-
+    needs: validate
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.41.5
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
-
-      - name: Enable Windows desktop
-        run: flutter config --enable-windows-desktop
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Build Windows
-        run: flutter build windows --release
-
+          cache: true
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter build windows --release --no-pub
       - name: Package Windows
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/release | Out-Null
-          Compress-Archive `
-            -Path build/windows/x64/runner/Release/* `
-            -DestinationPath build/release/KeyRing-Windows-${{ github.event.inputs.tag || github.ref_name }}.zip `
-            -Force
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath "build/release/KeyRing-Windows-$env:RELEASE_TAG.zip"
+      - uses: actions/upload-artifact@v4
         with:
           name: KeyRing-Windows
           path: build/release/*.zip
-
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: build/release/*.zip
+          if-no-files-found: error
 
   android:
     name: Android APK (split per ABI)
     runs-on: ubuntu-latest
-    needs: create-release
-
+    needs: validate
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Java
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.41.5
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
-
-      - name: Install dependencies
-        run: flutter pub get
-
+          cache: true
+      - run: flutter pub get --enforce-lockfile
       - name: Restore release signing config
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -106,129 +95,120 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::warning::ANDROID_KEYSTORE_BASE64 未配置，回退 debug 签名（不可覆盖安装已发布版本）"
-            exit 0
-          fi
-          # build.gradle.kts 中 storeFile 相对 android/app/ 目录解析
-          printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/app/keyring-release.jks
+          for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing Android release signing secret: $name"
+              exit 1
+            fi
+          done
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/keyring-release.jks
           cat > android/key.properties <<EOF
-          storeFile=keyring-release.jks
           storePassword=$STORE_PASSWORD
-          keyAlias=$KEY_ALIAS
           keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=keyring-release.jks
           EOF
-
-      - name: Build Android APK (split per ABI)
-        run: flutter build apk --release --split-per-abi
-
-      - name: Package Android
+      - run: flutter build apk --release --split-per-abi --no-pub
+      - name: Package APKs
         run: |
           mkdir -p build/release
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          for f in build/app/outputs/flutter-apk/*.apk; do
-            base=$(basename "$f" .apk)
-            cp "$f" "build/release/KeyRing-Android-${base}-${TAG}.apk"
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            cp "build/app/outputs/flutter-apk/app-$abi-release.apk" "build/release/KeyRing-Android-app-$abi-release-$RELEASE_TAG.apk"
           done
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: KeyRing-Android
           path: build/release/*.apk
-
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: build/release/*.apk
+          if-no-files-found: error
 
   macos:
     name: macOS app
     runs-on: macos-latest
-    needs: create-release
-
+    needs: validate
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.41.5
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
-
-      - name: Enable macOS desktop
-        run: flutter config --enable-macos-desktop
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Build macOS
-        run: flutter build macos --release
-
+          cache: true
+      - run: flutter config --enable-macos-desktop
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter build macos --release --no-pub
       - name: Package macOS
         run: |
           mkdir -p build/release
-          # ditto 输出到项目根的 build/release/；从 Products/Release 回到 build/ 需后退 4 级。
-          cd build/macos/Build/Products/Release
-          ditto -c -k --keepParent \
-            "key_ring.app" \
-            "../../../../release/KeyRing-macOS-${{ github.event.inputs.tag || github.ref_name }}.zip"
-          ls -la ../../../../release/
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          ditto -c -k --keepParent build/macos/Build/Products/Release/KeyRing.app "build/release/KeyRing-macOS-$RELEASE_TAG.zip"
+      - uses: actions/upload-artifact@v4
         with:
           name: KeyRing-macOS
           path: build/release/*.zip
           if-no-files-found: error
 
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: build/release/*.zip
-
   ios:
     name: iOS unsigned app
     runs-on: macos-latest
-    needs: create-release
-
+    needs: validate
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.41.5
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Build iOS without codesign
-        run: flutter build ios --release --no-codesign
-
-      - name: Package iOS app
+          cache: true
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter build ios --release --no-codesign --no-pub
+      - name: Package iOS
         run: |
           mkdir -p build/release
-          ditto -c -k --keepParent \
-            build/ios/iphoneos/Runner.app \
-            "build/release/KeyRing-iOS-${{ github.event.inputs.tag || github.ref_name }}-unsigned.zip"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          ditto -c -k --keepParent build/ios/iphoneos/Runner.app "build/release/KeyRing-iOS-$RELEASE_TAG-unsigned.zip"
+      - uses: actions/upload-artifact@v4
         with:
           name: KeyRing-iOS-unsigned
           path: build/release/*.zip
+          if-no-files-found: error
 
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
+  publish:
+    name: Publish complete release
+    runs-on: ubuntu-latest
+    needs: [windows, android, macos, ios]
+    if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: build/release/*.zip
+          pattern: KeyRing-*
+          path: build/release
+          merge-multiple: true
+      - name: Verify packages and generate checksums
+        working-directory: build/release
+        run: |
+          for file in "KeyRing-Windows-$RELEASE_TAG.zip" "KeyRing-macOS-$RELEASE_TAG.zip" "KeyRing-iOS-$RELEASE_TAG-unsigned.zip" "KeyRing-Android-app-arm64-v8a-release-$RELEASE_TAG.apk" "KeyRing-Android-app-armeabi-v7a-release-$RELEASE_TAG.apk" "KeyRing-Android-app-x86_64-release-$RELEASE_TAG.apk"; do
+            test -s "$file"
+          done
+          sha256sum *.zip *.apk > SHA256SUMS.txt
+      - name: Publish all assets together
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" > /dev/null; then
+            git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$GITHUB_SHA"
+          else
+            git tag "$RELEASE_TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+          # Interrupted uploads can resume only while the release is a draft.
+          if gh release view "$RELEASE_TAG" --json isDraft > /tmp/release.json 2>/dev/null; then
+            if [ "$(jq -r .isDraft /tmp/release.json)" != true ]; then
+              echo "::error::Release $RELEASE_TAG is already published"
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --notes-file "docs/releases/$RELEASE_TAG.md" --draft
+          fi
+          gh release upload "$RELEASE_TAG" build/release/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest

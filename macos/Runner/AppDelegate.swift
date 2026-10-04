@@ -21,37 +21,42 @@ class AppDelegate: FlutterAppDelegate {
   }
 }
 
-/// 把 desktop_multi_window 创建的子窗口样式化成 1Password 式浮动小面板：
-/// 无边框视觉、置顶、固定尺寸、打开时中心对齐鼠标光标。
+/// A keyboard-capable panel that never activates or raises the main window.
+final class QuickFillPanel: NSPanel, NSWindowDelegate {
+  var eventChannel: FlutterMethodChannel?
+  var authenticating = false
+  override var canBecomeKey: Bool { true }
+  override var canBecomeMain: Bool { false }
+  func windowDidResignKey(_ notification: Notification) {
+    if !authenticating && isVisible { eventChannel?.invokeMethod("blur", arguments: nil) }
+  }
+}
+
 enum QuickFillWindowStyler {
-  /// 快速填充面板窗口（弱引用，供每次呼起时重新定位）。
-  static weak var panelWindow: NSWindow?
-
+  static var panelWindow: QuickFillPanel?
   static func install() {
-    // desktop_multi_window 创建子窗口后回调（公开 setter）。
     FlutterMultiWindowPlugin.setOnWindowCreatedCallback { controller in
-      guard let window = controller.view.window else { return }
-      panelWindow = window
-
-      // 保留 titled 以便可成为 key window，但视觉上完全无边框。
-      window.styleMask.insert(.fullSizeContentView)
-      window.titlebarAppearsTransparent = true
-      window.titleVisibility = .hidden
-      window.standardWindowButton(.closeButton)?.isHidden = true
-      window.standardWindowButton(.miniaturizeButton)?.isHidden = true
-      window.standardWindowButton(.zoomButton)?.isHidden = true
-      window.isMovable = false
-      window.styleMask.remove(.resizable)
-      window.level = .floating
-      window.isOpaque = false
-      window.backgroundColor = .clear
-      window.hasShadow = true
-      window.hidesOnDeactivate = false
-
-      // 尺寸固定；位置在每次呼起时由 centerPanelAtMouse 定位。
-      let size = NSSize(width: 460, height: 520)
-      window.setContentSize(size)
-      positionAtMouse(window)
+      guard let original = controller.view.window else { return }
+      let panel = QuickFillPanel(
+        contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
+        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+      original.orderOut(nil)
+      original.contentViewController = nil
+      panel.contentViewController = controller
+      panel.isReleasedWhenClosed = false
+      panel.isFloatingPanel = true
+      panel.becomesKeyOnlyIfNeeded = false
+      panel.level = .floating
+      panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+      panel.isOpaque = false
+      panel.backgroundColor = .clear
+      panel.hasShadow = true
+      panel.hidesOnDeactivate = false
+      panel.delegate = panel
+      panel.eventChannel = FlutterMethodChannel(name: "keyring/quickfill_window",
+        binaryMessenger: controller.engine.binaryMessenger)
+      panelWindow = panel
+      positionAtMouse(panel)
     }
   }
 
@@ -110,14 +115,24 @@ enum ForegroundAppChannel {
           ok = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         }
         result(ok)
-      case "activateSelf":
-        // 呼出快速填充面板前把 KeyRing 带回前台：后台 app 的窗口
-        // 无法直接成为 key window，搜索框会拿不到键盘焦点。
-        NSApp.activate(ignoringOtherApps: true)
-        result(true)
-      case "centerPanelAtMouse":
-        // 每次呼起都把面板中心定位到鼠标光标处（夹在可视区内）。
-        result(QuickFillWindowStyler.positionAtMouse(QuickFillWindowStyler.panelWindow))
+      case "showPanel":
+        guard let panel = QuickFillWindowStyler.panelWindow else {
+          result(FlutterError(code: "panel_missing", message: "Quick fill panel unavailable", details: nil))
+          return
+        }
+        QuickFillWindowStyler.positionAtMouse(panel)
+        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
+        if let view = panel.contentView { panel.makeFirstResponder(view) }
+        result(nil)
+      case "hidePanel":
+        QuickFillWindowStyler.panelWindow?.orderOut(nil)
+        result(nil)
+      case "panelAuthenticating":
+        QuickFillWindowStyler.panelWindow?.authenticating = call.arguments as? Bool ?? false
+        result(nil)
+      case "isTargetActive":
+        result(rememberedApp != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier == rememberedApp?.processIdentifier)
       default:
         result(FlutterMethodNotImplemented)
       }

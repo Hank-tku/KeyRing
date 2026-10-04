@@ -4,7 +4,9 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../models/item_group.dart';
 import '../models/password_item.dart';
+import '../models/workspace.dart';
 import 'vault_metadata_service.dart';
 
 class DataExportResult {
@@ -14,13 +16,39 @@ class DataExportResult {
   final int itemCount;
 }
 
+/// 导入文件解析结果（v2 结构文件包含工作区/分组定义；v1 只有条目）。
+class ParsedImport {
+  const ParsedImport({
+    required this.rawItems,
+    this.rawWorkspaces = const <Map<String, dynamic>>[],
+    this.rawGroups = const <Map<String, dynamic>>[],
+    this.exportVersion = 1,
+  });
+
+  /// 条目原始 map（保留键存在性，供字段保留合并判断缺键）。
+  final List<Map<String, dynamic>> rawItems;
+  final List<Map<String, dynamic>> rawWorkspaces;
+  final List<Map<String, dynamic>> rawGroups;
+  final int exportVersion;
+
+  List<PasswordItem> get items =>
+      rawItems.map(PasswordItem.fromMap).toList();
+}
+
 class DataExportService {
   DataExportService({VaultMetadataService? metadataService})
     : _metadataService = metadataService ?? VaultMetadataService();
 
   final VaultMetadataService _metadataService;
 
-  Future<DataExportResult> exportJson(List<PasswordItem> items) async {
+  /// 导出为 v2 JSON：条目携带工作区归属与保密项，顶层带结构定义。
+  /// 旧版应用导入该文件时只读 items 并忽略新键（graceful degradation）。
+  Future<DataExportResult> exportJson(
+    List<PasswordItem> items, {
+    List<Workspace>? workspaces,
+    List<ItemGroup>? groups,
+    bool Function()? isAuthorized,
+  }) async {
     final Directory directory = await _resolveExportDirectory();
     if (!await directory.exists()) {
       await directory.create(recursive: true);
@@ -34,50 +62,60 @@ class DataExportService {
     );
     final Map<String, dynamic> payload = <String, dynamic>{
       'app': 'KeyRing',
-      'exportVersion': 1,
+      'exportVersion': 2,
       'exportedAt': DateTime.now().toIso8601String(),
       'vaultVersion': metadata.vaultVersion,
       'protocolVersion': metadata.protocolVersion,
       'itemCount': items.length,
+      'workspaces': (workspaces ?? const <Workspace>[])
+          .map((Workspace w) => w.toMap())
+          .toList(),
+      'groups': (groups ?? const <ItemGroup>[])
+          .map((ItemGroup g) => g.toMap())
+          .toList(),
       'items': items.map((PasswordItem item) => item.toMap()).toList(),
     };
 
     const JsonEncoder encoder = JsonEncoder.withIndent('  ');
+    if (isAuthorized != null && !isAuthorized()) throw StateError('访问授权已失效');
     await File(filePath).writeAsString(encoder.convert(payload));
     return DataExportResult(path: filePath, itemCount: items.length);
   }
 
-  /// 从 JSON 文件导入密码条目。
-  ///
-  /// 兼容两种格式：
-  /// - 标准导出格式 `{app, items: [...]}`（见 exportJson）
-  /// - 纯数组格式 `[...]`（直接是条目列表）
-  /// 返回解析出的 [PasswordItem] 列表，合并/去重由调用方决定。
-  Future<List<PasswordItem>> importJson(String filePath) async {
+  /// 从 JSON 文件导入密码条目（含结构定义）。
+  Future<ParsedImport> importJson(String filePath) async {
     final String raw = await File(filePath).readAsString();
-    return parseJsonItems(raw);
+    return parseJsonBundle(raw);
   }
 
-  /// 解析 JSON 文本为 [PasswordItem] 列表（与 [importJson] 同规则）。
-  ///
-  /// 抽取为静态方法，便于二维码（内容即 JSON 文本）等非文件来源复用，
-  /// 无需先落盘成文件。
-  static List<PasswordItem> parseJsonItems(String raw) {
+  /// 解析 JSON 文本为 [PasswordItem] 列表（v1 行为，二维码等单条来源复用）。
+  static List<PasswordItem> parseJsonItems(String raw) =>
+      parseJsonBundle(raw).items;
+
+  /// 解析 v1/v2 导出格式。兼容：
+  /// - 标准导出格式 `{app, items: [...], workspaces?, groups?}`
+  /// - 纯数组格式 `[...]`
+  static ParsedImport parseJsonBundle(String raw) {
     final dynamic decoded = jsonDecode(raw);
 
-    List<dynamic> rawItems;
-    if (decoded is Map<String, dynamic> && decoded['items'] is List) {
-      rawItems = decoded['items'] as List;
-    } else if (decoded is List) {
-      rawItems = decoded;
-    } else {
-      throw const FormatException('无法识别的导入文件格式');
-    }
-
-    return rawItems
+    List<Map<String, dynamic>> asMaps(dynamic list) => (list as List? ?? <dynamic>[])
         .whereType<Map>()
-        .map((Map m) => PasswordItem.fromMap(m))
+        .map((Map m) => Map<String, dynamic>.from(m))
         .toList();
+
+    if (decoded is Map<String, dynamic> && decoded['items'] is List) {
+      return ParsedImport(
+        rawItems: asMaps(decoded['items']),
+        rawWorkspaces: asMaps(decoded['workspaces']),
+        rawGroups: asMaps(decoded['groups']),
+        exportVersion:
+            decoded['exportVersion'] as int? ?? 1,
+      );
+    }
+    if (decoded is List) {
+      return ParsedImport(rawItems: asMaps(decoded));
+    }
+    throw const FormatException('无法识别的导入文件格式');
   }
 
   Future<Directory> _resolveExportDirectory() async {

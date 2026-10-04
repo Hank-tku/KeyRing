@@ -2,6 +2,9 @@ import 'database_backup_service.dart';
 import 'password_repository.dart';
 import 'vault_metadata_service.dart';
 
+/// 结构迁移守卫：在任何 DB 版本升级**之前**做整库文件备份。
+///
+/// 必须在 `PasswordRepository.init()`（触发 onUpgrade）之前运行。
 class MigrationService {
   MigrationService({
     required PasswordRepository repository,
@@ -17,15 +20,11 @@ class MigrationService {
 
   Future<VaultMetadata> prepareCompatibility() async {
     final VaultMetadata metadata = await _metadataService.load();
-    if (metadata.hasExplicitVaultVersion) {
+    if (metadata.vaultVersion >= VaultMetadataService.currentVaultVersion) {
       return metadata;
     }
 
-    if (_repository.itemsNotifier.value.isEmpty) {
-      await _metadataService.markCompatibilityPrepared(needsMigration: false);
-      return _metadataService.load();
-    }
-
+    // 即将发生 v(n → n+1) 结构迁移：先备份库文件（不存在则跳过，如全新安装）。
     final String? backupPath = await _backupService.createLegacyBackup(
       await _repository.databasePath(),
       metadata.vaultVersion,

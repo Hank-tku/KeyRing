@@ -4,18 +4,29 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 
+import '../models/workspace.dart';
+import '../services/device_service.dart';
 import '../services/global_hotkey_service.dart';
 import '../services/hotkey_settings_service.dart';
+import '../services/password_repository.dart';
+import '../services/vault_metadata_service.dart';
 import '../utils/theme_config.dart';
 
-/// 设置页：桌面端全局热键的自定义录制。
+/// 设置页：桌面端全局热键的自定义录制 + 同步信息总览。
 ///
 /// 借鉴 1Password：录制新组合即时生效（占用预检失败会提示并保持原热键），
 /// 支持恢复平台默认热键。
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key, required this.hotkeyService});
+  const SettingsScreen({
+    super.key,
+    required this.hotkeyService,
+    this.repository,
+  });
 
   final GlobalHotkeyService hotkeyService;
+
+  /// 传入时展示「同步」分区（设备类型、协议版本、工作区策略总览）。
+  final PasswordRepository? repository;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -28,8 +39,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// 修饰键本身的物理键：录制器在"只按住修饰键还没按主键"时也会回调，
   /// 这些过渡事件直接忽略，等用户继续按主键。
   /// （PhysicalKeyboardKey 重载了 ==，不能放进 const 集合。）
-  static final Set<PhysicalKeyboardKey> _modifierKeys =
-      <PhysicalKeyboardKey>{
+  static final Set<PhysicalKeyboardKey> _modifierKeys = <PhysicalKeyboardKey>{
     PhysicalKeyboardKey.controlLeft,
     PhysicalKeyboardKey.controlRight,
     PhysicalKeyboardKey.shiftLeft,
@@ -52,8 +62,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     setState(() => _saving = true);
-    final HotkeyRegisterStatus status =
-        await widget.hotkeyService.rebind(newConfig);
+    final HotkeyRegisterStatus status = await widget.hotkeyService.rebind(
+      newConfig,
+    );
     if (!mounted) return;
     setState(() => _saving = false);
     switch (status) {
@@ -94,8 +105,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        backgroundColor:
-            success ? ThemeConfig.successColor : ThemeConfig.dangerColor,
+        backgroundColor: success
+            ? ThemeConfig.successColor
+            : ThemeConfig.dangerColor,
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -119,6 +131,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(ThemeConfig.space16),
         children: <Widget>[
+          const ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.lock_clock_outlined),
+            title: Text('后台自动锁定'),
+            subtitle: Text('离开 KeyRing 满 2 分钟后锁定；短暂切走再返回可继续使用。'),
+          ),
+          const SizedBox(height: ThemeConfig.space16),
           const Text(
             '全局快捷键',
             style: TextStyle(
@@ -267,8 +286,139 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ],
+          if (widget.repository != null) ...<Widget>[
+            const SizedBox(height: ThemeConfig.space24),
+            _buildSyncSection(),
+          ],
         ],
       ),
+    );
+  }
+
+  /// 同步分区：本设备角色、协议版本、工作区策略总览（只读）。
+  Widget _buildSyncSection() {
+    final PasswordRepository repository = widget.repository!;
+    final DeviceService deviceService = DeviceService();
+    final bool isDesktop = deviceService.getDeviceClass() == 'desktop';
+    final List<Workspace> workspaces = repository.workspacesNotifier.value;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        const Text(
+          '同步',
+          style: TextStyle(
+            fontSize: ThemeConfig.fontSizeSubtitle,
+            fontWeight: FontWeight.w600,
+            color: ThemeConfig.textColor,
+          ),
+        ),
+        const SizedBox(height: ThemeConfig.space4),
+        Text(
+          '局域网同步按工作区策略选择性同步；双方都需要 v2 及以上版本。',
+          style: const TextStyle(
+            fontSize: ThemeConfig.fontSizeCaption,
+            color: ThemeConfig.secondaryTextColor,
+          ),
+        ),
+        const SizedBox(height: ThemeConfig.space12),
+        Container(
+          padding: const EdgeInsets.all(ThemeConfig.space16),
+          decoration: BoxDecoration(
+            color: ThemeConfig.fillColor,
+            borderRadius: BorderRadius.circular(ThemeConfig.radiusMd),
+            border: Border.all(color: ThemeConfig.dividerColor),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Text(
+                      '本设备',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: ThemeConfig.textColor,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${deviceService.getPlatformType()} · ${isDesktop ? '桌面端' : '移动端'}',
+                    style: const TextStyle(
+                      color: ThemeConfig.primaryColor,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: ThemeConfig.space8),
+              Row(
+                children: <Widget>[
+                  const Expanded(
+                    child: Text(
+                      '同步协议版本',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: ThemeConfig.textColor,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    'v${VaultMetadataService.currentProtocolVersion}',
+                    style: const TextStyle(
+                      color: ThemeConfig.primaryColor,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+              if (workspaces.isNotEmpty) ...<Widget>[
+                const Divider(color: ThemeConfig.dividerColor),
+                const Text(
+                  '工作区同步策略',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: ThemeConfig.textColor,
+                  ),
+                ),
+                const SizedBox(height: ThemeConfig.space4),
+                for (final Workspace w in workspaces)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: Text(
+                            '${w.icon ?? ''} ${w.name}'.trim(),
+                            style: const TextStyle(
+                              color: ThemeConfig.secondaryTextColor,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          switch (w.syncPolicy) {
+                            SyncPolicy.full => '全设备同步',
+                            SyncPolicy.mobileOnly => '仅移动端',
+                            SyncPolicy.localOnly => '仅本机',
+                          },
+                          style: TextStyle(
+                            color: switch (w.syncPolicy) {
+                              SyncPolicy.full => ThemeConfig.successColor,
+                              SyncPolicy.mobileOnly => ThemeConfig.warningColor,
+                              SyncPolicy.localOnly => ThemeConfig.dangerColor,
+                            },
+                            fontSize: ThemeConfig.fontSizeCaption,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -277,8 +427,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       key: config.key,
       modifiers: <HotKeyModifier>[
         for (final String name in config.modifiers)
-          if (HotKeyModifier.values
-              .any((HotKeyModifier m) => m.name == name))
+          if (HotKeyModifier.values.any((HotKeyModifier m) => m.name == name))
             HotKeyModifier.values.firstWhere(
               (HotKeyModifier m) => m.name == name,
             ),

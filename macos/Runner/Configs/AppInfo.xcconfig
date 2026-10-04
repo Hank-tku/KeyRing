@@ -5,7 +5,7 @@
 // 'flutter create' template.
 
 // The application's name. By default this is also the title of the Flutter window.
-PRODUCT_NAME = key_ring
+PRODUCT_NAME = KeyRing
 
 // The application's bundle identifier
 PRODUCT_BUNDLE_IDENTIFIER = com.example.keyRing
@@ -14,4 +14,4 @@ PRODUCT_BUNDLE_IDENTIFIER = com.example.keyRing
 PRODUCT_COPYRIGHT = Copyright © 2025 com.example. All rights reserved.
 
 // macOS deployment target
-MACOSX_DEPLOYMENT_TARGET = 10.15
+MACOSX_DEPLOYMENT_TARGET = 12.0

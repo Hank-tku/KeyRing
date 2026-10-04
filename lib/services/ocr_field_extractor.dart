@@ -1,4 +1,5 @@
 import '../models/password_item.dart';
+import '../models/secret_field.dart';
 
 /// 截图 OCR 字段提取结果。
 class OcrExtraction {
@@ -8,6 +9,7 @@ class OcrExtraction {
     this.password = '',
     this.url,
     this.notes,
+    this.fields = const <SecretField>[],
     this.confidence = 0,
   });
 
@@ -17,9 +19,29 @@ class OcrExtraction {
   final String? url;
   final String? notes;
 
+  /// 识别到的保密项（安全码/客户号/PIN 等），尽力而为，供用户复核。
+  final List<SecretField> fields;
+
   /// 估计的置信度（0~1），基于命中的标签行数。供 UI 提示用户复核。
   final double confidence;
 }
+
+/// 保密项关键词 → 保密项类型（识别后映射默认展示类型）。
+const Map<String, SecretFieldType> _secretFieldKeywords =
+    <String, SecretFieldType>{
+      '安全码': SecretFieldType.password,
+      '安全密码': SecretFieldType.password,
+      'cvv': SecretFieldType.password,
+      '客户号': SecretFieldType.text,
+      '客户编号': SecretFieldType.text,
+      '会员号': SecretFieldType.text,
+      '会员编号': SecretFieldType.text,
+      'pin': SecretFieldType.password,
+      '备用邮箱': SecretFieldType.text,
+      '恢复代码': SecretFieldType.text,
+      '恢复码': SecretFieldType.text,
+      '客服电话': SecretFieldType.tel,
+    };
 
 /// 对 OCR 识别出的多行文本做启发式字段抽取。
 ///
@@ -43,6 +65,7 @@ class OcrFieldExtractor {
     String username = '';
     String password = '';
     String url = '';
+    final List<SecretField> fields = <SecretField>[];
     final List<String> leftover = <String>[];
     int hits = 0;
 
@@ -73,11 +96,14 @@ class OcrFieldExtractor {
           continue;
         }
       } else if (_matches(lower, const <String>['密码', 'password', 'pwd', '口令'])) {
-        final String? v = nextValue();
-        if (v != null && v.isNotEmpty) {
-          password = v;
-          hits++;
-          continue;
+        // 「安全密码」按保密项处理，不落入主密码。
+        if (!_matches(lower, _secretFieldKeywords.keys.toList())) {
+          final String? v = nextValue();
+          if (v != null && v.isNotEmpty) {
+            password = v;
+            hits++;
+            continue;
+          }
         }
       } else if (_matches(lower, const <String>['网址', 'url', 'website', '链接', '地址'])) {
         final String? v = nextValue();
@@ -86,9 +112,23 @@ class OcrFieldExtractor {
           hits++;
           continue;
         }
-      } else {
-        leftover.add(line);
       }
+      if (_matchSecretFieldKeyword(lower) case final String keyword?) {
+        final String? v = nextValue();
+        if (v != null && v.isNotEmpty && v != line) {
+          fields.add(SecretField(
+            label: keyword,
+            value: v,
+            type: _secretFieldKeywords[keyword] ?? SecretFieldType.text,
+            protected:
+                (_secretFieldKeywords[keyword] ?? SecretFieldType.text) ==
+                SecretFieldType.password,
+          ));
+          hits++;
+          continue;
+        }
+      }
+      leftover.add(line);
     }
 
     // title：未命中专门标签时，取首行；否则尝试从剩余行第一行。
@@ -109,6 +149,7 @@ class OcrFieldExtractor {
       password: password,
       url: url.isEmpty ? null : url,
       notes: notes,
+      fields: fields,
       confidence: confidence,
     );
   }
@@ -120,13 +161,32 @@ class OcrFieldExtractor {
     return false;
   }
 
+  /// 命中保密项关键词时返回该关键词（多个命中取最长），否则 null。
+  /// 短英文词（pin/cvv）要求冒号前整词相等，避免 shipping 之类误命中。
+  String? _matchSecretFieldKeyword(String lowerLine) {
+    String? best;
+    for (final String k in _secretFieldKeywords.keys) {
+      final bool isShortLatin =
+          RegExp(r'^[a-z]+$').hasMatch(k) && k.length <= 4;
+      if (isShortLatin) {
+        final String before = lowerLine.split(RegExp(r'[:：]')).first.trim();
+        if (before != k) continue;
+      } else if (!lowerLine.contains(k)) {
+        continue;
+      }
+      if (best == null || k.length > best.length) best = k;
+    }
+    return best;
+  }
+
   bool _looksLikeLabel(String line) {
     final String lower = line.toLowerCase();
     return _matches(lower, const <String>[
-      '用户名', 'username', '账号', 'account', 'email', '邮箱',
-      '密码', 'password', 'pwd',
-      '网址', 'url', 'website',
-    ]);
+          '用户名', 'username', '账号', 'account', 'email', '邮箱',
+          '密码', 'password', 'pwd',
+          '网址', 'url', 'website',
+        ]) ||
+        _matchSecretFieldKeyword(lower) != null;
   }
 
   /// 把提取结果转成待确认的 [PasswordItem]（不写入仓库）。
@@ -137,6 +197,7 @@ class OcrFieldExtractor {
       password: e.password,
       url: e.url,
       notes: e.notes,
+      customFields: e.fields,
     );
   }
 }

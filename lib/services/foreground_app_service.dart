@@ -33,32 +33,23 @@ class ForegroundAppService {
     }
   }
 
-  /// 把 KeyRing 自身带回前台（呼出面板前抢回键盘焦点）。
-  ///
-  /// 热键触发时 KeyRing 在后台，macOS 不允许后台 app 的窗口直接成为
-  /// key window；必须先 activate 整个应用，搜索框才能获得键盘焦点。
-  static Future<void> activateSelf() async {
-    if (!isSupported) return;
-    try {
-      await _channel.invokeMethod<void>('activateSelf');
-    } on MissingPluginException {
-      // 平台未实现，忽略。
-    } on PlatformException {
-      // 忽略。
+  /// macOS uses a nonactivating NSPanel; never activate the application.
+  static Future<void> showPanel() => _channel.invokeMethod<void>('showPanel');
+  static Future<void> hidePanel() => _channel.invokeMethod<void>('hidePanel');
+  static Future<void> setPanelAuthenticating(bool value) async {
+    if (Platform.isMacOS) {
+      await _channel.invokeMethod<void>('panelAuthenticating', value);
     }
   }
 
-  /// 把快速填充面板中心定位到鼠标光标处（每次呼起前调用）。
-  ///
-  /// 原生侧负责夹在该屏可视区内；Windows/Linux 未实现时静默跳过。
-  static Future<void> centerPanelAtMouse() async {
-    if (!isSupported) return;
+  static Future<bool> isTargetActive() async {
+    if (!isSupported) return false;
     try {
-      await _channel.invokeMethod<void>('centerPanelAtMouse');
-    } on MissingPluginException {
-      // 平台未实现，忽略。
+      return await _channel.invokeMethod<bool>('isTargetActive') ?? false;
     } on PlatformException {
-      // 忽略。
+      return false;
+    } on MissingPluginException {
+      return false;
     }
   }
 
@@ -68,8 +59,7 @@ class ForegroundAppService {
   static Future<bool> activate() async {
     if (!isSupported) return false;
     try {
-      final bool ok =
-          await _channel.invokeMethod<bool>('activate') ?? false;
+      final bool ok = await _channel.invokeMethod<bool>('activate') ?? false;
       return ok;
     } on MissingPluginException {
       return false;
