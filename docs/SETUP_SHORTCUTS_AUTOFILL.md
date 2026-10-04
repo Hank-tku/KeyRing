@@ -19,7 +19,7 @@
 - **流程**：任意应用中按热键 → KeyRing 记住当前前台应用并弹出置顶候选面板（中心对齐鼠标光标，自动夹在屏幕可视区内）→ `↑↓` 选择、`↵` 填充、`Esc` 关闭 → 自动切回原应用并输入「用户名 → Tab → 密码」
 - 面板每次呼起都会刷新条目；10 秒无操作或失焦自动隐藏
 - 填充失败（如未授权辅助功能）会在面板内显示原因
-- **锁定保护**：KeyRing 处于锁定状态时按热键不会弹出条目列表，只会唤起主窗口的解锁界面
+- **锁定保护**：KeyRing 锁定时仅显示快捷面板内的解锁入口，系统认证成功后显示候选；主窗口保持原状态。
 - **热键冲突检测**：录制新热键时先向系统预检组合是否被其它应用占用（macOS Carbon / Windows RegisterHotKey 试注册探测），被占用时保留原热键并提示；`⌘Space`、`⌘Tab`（Windows 为 `Win+L`）等系统保留组合会被拦截
 - 媒体键等无法注册的按键会被拒绝（避免原生层崩溃）；只按住修饰键未按主键时不会误报错误
 
@@ -66,7 +66,7 @@
 ### 开发者/发布须知
 
 - 扩展 target `CredentialProvider` 已通过 `ios/add_credential_provider_target.rb`（幂等脚本，可重复运行）加入工程，并随主 app 一起构建。
-- 主 app 会在启动和退后台时把 `KeyRing.db` 拷贝到 App Group `group.com.example.keyRing.shared`，扩展只读该副本。
+- 主 app 在初始化与条目／工作区保护设置变化时，将未受保护工作区的自动填充字段写入 App Group `group.com.example.keyRing.shared` 的过滤副本；扩展只读该副本。受保护工作区不会进入副本，刷新失败时不使用旧副本。
 - **发布前必须在 Apple Developer 后台为两个 App ID（主 app 与扩展）启用 App Groups capability**（组 ID：`group.com.example.keyRing.shared`），扩展还需 `AutoFill Credential Provider` capability，否则真机签名安装会失败。
 - 注意：当前扩展为「手动选择」模式，不支持静默填充（那需要实现凭据标识同步 ASCredentialIdentityStore，可作为后续增强）。
 

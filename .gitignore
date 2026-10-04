@@ -75,8 +75,9 @@ Thumbs.db
 .pub-cache/
 .pub/
 /build/
-pubspec.lock  # 对于应用程序项目，建议提交；对于库包，可忽略
 *.lock
+# 应用依赖锁定，确保本地验证与各平台 Release 使用同一组版本。
+!pubspec.lock
 
 # Android 平台相关
 **/android/**/gradle-wrapper.jar
