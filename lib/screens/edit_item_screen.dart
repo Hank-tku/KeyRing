@@ -12,6 +12,8 @@ import '../widgets/shared/app_card.dart';
 import '../widgets/shared/form_field_row.dart';
 import '../widgets/shared/password_visibility_toggle.dart';
 import '../widgets/shared/strength_indicator.dart';
+import '../widgets/shared/copy_button.dart';
+import '../widgets/shared/workspace_guard.dart';
 
 class EditItemScreen extends StatefulWidget {
   const EditItemScreen({
@@ -34,21 +36,24 @@ class EditItemScreen extends StatefulWidget {
 /// 保密项的编辑草稿（控制器随行销毁）。
 class _FieldDraft {
   _FieldDraft({
+    this.id,
     String label = '',
     String value = '',
     this.type = SecretFieldType.text,
     bool? isProtected,
   }) : labelController = TextEditingController(text: label),
        valueController = TextEditingController(text: value),
-       protected =
-           isProtected ?? type == SecretFieldType.password;
+       protected = isProtected ?? type == SecretFieldType.password;
 
+  final String? id;
+  bool obscure = true;
   final TextEditingController labelController;
   final TextEditingController valueController;
   SecretFieldType type;
   bool protected;
 
   SecretField toField() => SecretField(
+    id: id,
     label: labelController.text.trim(),
     value: valueController.text,
     type: type,
@@ -115,6 +120,7 @@ class _EditItemScreenState extends State<EditItemScreen> {
     for (final SecretField f in item?.customFields ?? const <SecretField>[]) {
       _fieldDrafts.add(
         _FieldDraft(
+          id: f.id,
           label: f.label,
           value: f.value,
           type: f.type,
@@ -282,13 +288,21 @@ class _EditItemScreenState extends State<EditItemScreen> {
   }
 
   Future<void> _save() async {
+    if (!await authorizeWorkspace(context, widget.repository, _workspaceId) ||
+        !mounted) {
+      return;
+    }
+    if (widget.initial != null &&
+        !widget.repository.access.canAccess(widget.initial!.workspaceId)) {
+      return;
+    }
     final String title = _titleController.text.trim();
     final String username = _usernameController.text.trim();
-    final String password = _passwordController.text.trim();
+    final String password = _passwordController.text;
     if (title.isEmpty || password.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('账号名和密码不能为空')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('账号名和密码不能为空')));
       return;
     }
 
@@ -297,15 +311,15 @@ class _EditItemScreenState extends State<EditItemScreen> {
     for (final _FieldDraft d in _fieldDrafts) {
       final String label = d.labelController.text.trim();
       if (label.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('保密项名称不能为空')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('保密项名称不能为空')));
         return;
       }
       if (labels.contains(label)) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('保密项"$label"重复了')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('保密项"$label"重复了')));
         return;
       }
       labels.add(label);
@@ -318,10 +332,11 @@ class _EditItemScreenState extends State<EditItemScreen> {
       exceptId: widget.initial?.id,
     );
     if (!mounted) return;
+    if (!widget.repository.access.canAccess(_workspaceId)) return;
     if (exists) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('该工作区内已存在同名账号，请使用其他账号名')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('该工作区内已存在同名账号，请使用其他账号名')));
       return;
     }
 
@@ -385,7 +400,9 @@ class _EditItemScreenState extends State<EditItemScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(foregroundColor: ThemeConfig.dangerColor),
+            style: TextButton.styleFrom(
+              foregroundColor: ThemeConfig.dangerColor,
+            ),
             child: const Text('删除'),
           ),
         ],
@@ -398,9 +415,9 @@ class _EditItemScreenState extends State<EditItemScreen> {
         if (mounted) Navigator.of(context).pop(true);
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('删除失败: $e')),
-          );
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('删除失败: $e')));
         }
       }
     }
@@ -421,7 +438,9 @@ class _EditItemScreenState extends State<EditItemScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(foregroundColor: ThemeConfig.dangerColor),
+            style: TextButton.styleFrom(
+              foregroundColor: ThemeConfig.dangerColor,
+            ),
             child: const Text('放弃'),
           ),
         ],
@@ -465,18 +484,22 @@ class _EditItemScreenState extends State<EditItemScreen> {
             ),
           ],
         ),
-        body: ListView(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
-          children: <Widget>[
-            _buildBasicSection(),
-            const SizedBox(height: ThemeConfig.space12),
-            _buildLocationSection(),
-            const SizedBox(height: ThemeConfig.space12),
-            _buildSecretFieldsSection(),
-            const SizedBox(height: ThemeConfig.space12),
-            _buildOptionalSection(),
-            const SizedBox(height: ThemeConfig.space8),
-          ],
+        body: WorkspaceGuard(
+          repository: widget.repository,
+          workspaceId: widget.initial?.workspaceId ?? _workspaceId,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+            children: <Widget>[
+              _buildBasicSection(),
+              const SizedBox(height: ThemeConfig.space12),
+              _buildLocationSection(),
+              const SizedBox(height: ThemeConfig.space12),
+              _buildSecretFieldsSection(),
+              const SizedBox(height: ThemeConfig.space12),
+              _buildOptionalSection(),
+              const SizedBox(height: ThemeConfig.space8),
+            ],
+          ),
         ),
         bottomNavigationBar: SafeArea(
           child: Padding(
@@ -518,9 +541,9 @@ class _EditItemScreenState extends State<EditItemScreen> {
           Text(
             '基本信息',
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  color: ThemeConfig.textColor,
-                ),
+              fontWeight: FontWeight.w600,
+              color: ThemeConfig.textColor,
+            ),
           ),
           const SizedBox(height: ThemeConfig.space12),
           FormFieldRow(
@@ -581,6 +604,11 @@ class _EditItemScreenState extends State<EditItemScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
                   IconButton(
+                    onPressed: () => _addField(),
+                    icon: const Icon(Icons.add),
+                    tooltip: '添加密码',
+                  ),
+                  IconButton(
                     onPressed: _showPasswordGenerator,
                     icon: const Icon(Icons.auto_fix_high),
                     tooltip: '生成密码',
@@ -615,9 +643,9 @@ class _EditItemScreenState extends State<EditItemScreen> {
           Text(
             '归属',
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  color: ThemeConfig.textColor,
-                ),
+              fontWeight: FontWeight.w600,
+              color: ThemeConfig.textColor,
+            ),
           ),
           const SizedBox(height: ThemeConfig.space12),
           FormFieldRow(
@@ -635,8 +663,12 @@ class _EditItemScreenState extends State<EditItemScreen> {
                     ),
                   ),
               ],
-              onChanged: (String? v) {
+              onChanged: (String? v) async {
                 if (v == null || v == _workspaceId) return;
+                if (!await authorizeWorkspace(context, widget.repository, v) ||
+                    !mounted) {
+                  return;
+                }
                 setState(() {
                   _workspaceId = v;
                   _groupId = null;
@@ -652,7 +684,10 @@ class _EditItemScreenState extends State<EditItemScreen> {
               key: ValueKey<String?>('grp-$_workspaceId-$_groupId'),
               initialValue: _groupId,
               items: <DropdownMenuItem<String?>>[
-                const DropdownMenuItem<String?>(value: null, child: Text('未分组')),
+                const DropdownMenuItem<String?>(
+                  value: null,
+                  child: Text('未分组'),
+                ),
                 for (final ItemGroup g in groups)
                   DropdownMenuItem<String?>(
                     value: g.id,
@@ -680,8 +715,12 @@ class _EditItemScreenState extends State<EditItemScreen> {
     setState(() {
       _fieldDrafts.add(
         _FieldDraft(
-          label: label,
-          type: type ?? SecretFieldType.text,
+          label: label.isEmpty
+              ? nextPasswordLabel(
+                  _fieldDrafts.map((d) => d.labelController.text),
+                )
+              : label,
+          type: type ?? SecretFieldType.password,
         ),
       );
       _dirty = true;
@@ -700,16 +739,16 @@ class _EditItemScreenState extends State<EditItemScreen> {
                 child: Text(
                   '保密项',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                        color: ThemeConfig.textColor,
-                      ),
+                    fontWeight: FontWeight.w600,
+                    color: ThemeConfig.textColor,
+                  ),
                 ),
               ),
               IconButton(
                 onPressed: () => _addField(),
                 icon: const Icon(Icons.add_circle_outline),
                 color: ThemeConfig.primaryColor,
-                tooltip: '添加保密项',
+                tooltip: '添加密码',
               ),
             ],
           ),
@@ -726,8 +765,7 @@ class _EditItemScreenState extends State<EditItemScreen> {
               ),
             )
           else
-            for (int i = 0; i < _fieldDrafts.length; i++)
-              _buildFieldRow(i),
+            for (int i = 0; i < _fieldDrafts.length; i++) _buildFieldRow(i),
           if (_fieldDrafts.isNotEmpty)
             const Divider(color: ThemeConfig.dividerColor),
           Wrap(
@@ -741,12 +779,16 @@ class _EditItemScreenState extends State<EditItemScreen> {
                     color: ThemeConfig.primaryColor,
                     fontSize: ThemeConfig.fontSizeCaption,
                   ),
-                  backgroundColor: ThemeConfig.primarySoft.withValues(alpha: 0.5),
+                  backgroundColor: ThemeConfig.primarySoft.withValues(
+                    alpha: 0.5,
+                  ),
                   side: BorderSide(
                     color: ThemeConfig.primaryColor.withValues(alpha: 0.3),
                   ),
-                  onPressed: () =>
-                      _addField(label: template, type: _templateTypes[template]),
+                  onPressed: () => _addField(
+                    label: template,
+                    type: _templateTypes[template],
+                  ),
                 ),
             ],
           ),
@@ -819,12 +861,12 @@ class _EditItemScreenState extends State<EditItemScreen> {
               IconButton(
                 onPressed: () {
                   setState(() {
-                    draft.protected = !draft.protected;
+                    draft.obscure = !draft.obscure;
                     _dirty = true;
                   });
                 },
                 icon: Icon(
-                  draft.protected
+                  draft.obscure
                       ? Icons.visibility_off_outlined
                       : Icons.visibility_outlined,
                   size: 18,
@@ -832,7 +874,7 @@ class _EditItemScreenState extends State<EditItemScreen> {
                 color: draft.protected
                     ? ThemeConfig.primaryColor
                     : ThemeConfig.hintTextColor,
-                tooltip: draft.protected ? '默认掩码显示' : '明文显示',
+                tooltip: draft.obscure ? '显示内容' : '隐藏内容',
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
               ),
@@ -854,9 +896,9 @@ class _EditItemScreenState extends State<EditItemScreen> {
           const SizedBox(height: ThemeConfig.space4),
           TextField(
             controller: draft.valueController,
-            obscureText: draft.protected,
+            obscureText: draft.obscure,
             onChanged: (_) {
-              if (!_dirty) setState(() => _dirty = true);
+              setState(() => _dirty = true);
             },
             style: const TextStyle(color: ThemeConfig.textColor),
             decoration: InputDecoration(
@@ -866,15 +908,25 @@ class _EditItemScreenState extends State<EditItemScreen> {
                 horizontal: 12,
                 vertical: 10,
               ),
-              suffixIcon: draft.protected
-                  ? PasswordVisibilityToggle(
-                      obscured: true,
-                      onToggle: () => setState(
-                        () => draft.protected = !draft.protected,
-                      ),
-                      iconSize: 20,
-                    )
-                  : null,
+              suffixIcon: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (draft.type == SecretFieldType.password)
+                    IconButton(
+                      tooltip: '生成此密码',
+                      icon: const Icon(Icons.auto_fix_high, size: 20),
+                      onPressed: () => setState(() {
+                        draft.valueController.text =
+                            PasswordUtils.generatePassword();
+                        _dirty = true;
+                      }),
+                    ),
+                  CopyButton(
+                    text: draft.valueController.text,
+                    label: draft.labelController.text,
+                  ),
+                ],
+              ),
             ),
           ),
         ],

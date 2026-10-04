@@ -1,3 +1,4 @@
+import 'app_lock_state.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
@@ -302,12 +303,16 @@ class LanSyncService {
   ///   mobileOnly 工作区的任何痕迹，连名称都没有）；墓碑按 scope 过滤。
   Future<Map<String, dynamic>> _buildOutgoingSyncData(String peerId) async {
     final int vaultVersion = (await _metadataService.load()).vaultVersion;
+    final generation = repository.access.generation;
     final PeerCapabilities? caps = _peerCaps[peerId];
-    final List<PasswordItem> allItems = repository.itemsNotifier.value;
+    final List<PasswordItem> allItems = repository.itemsNotifier.value
+        .where((item) => !AppLockState.isLocked && repository.access.canAccess(item.workspaceId))
+        .toList();
 
     if (caps == null) {
       return _protocolCodec.syncData(
         itemMaps: allItems
+            .where((item) => repository.workspacesNotifier.value.any((w) => w.id == item.workspaceId && w.syncPolicy == SyncPolicy.full))
             .map((PasswordItem item) => item.toLegacyMap())
             .toList(),
         deviceClass: _deviceClass,
@@ -319,7 +324,11 @@ class LanSyncService {
     final List<Workspace> visibleWorkspaces = repository
         .workspacesNotifier
         .value
-        .where((Workspace w) => w.syncPolicy.visibleTo(peerClass))
+        .where(
+          (Workspace w) =>
+              !AppLockState.isLocked && w.syncPolicy.visibleTo(peerClass) &&
+              repository.access.canAccess(w.id),
+        )
         .toList();
     final Set<String> visibleWorkspaceIds = visibleWorkspaces
         .map((Workspace w) => w.id)
@@ -334,18 +343,18 @@ class LanSyncService {
       peerClass,
     );
 
+    if (generation != repository.access.generation || AppLockState.isLocked) {
+      return _protocolCodec.syncData(itemMaps: [], deviceClass: _deviceClass, vaultVersion: vaultVersion);
+    }
+
     return _protocolCodec.syncData(
       itemMaps: itemMaps,
-      workspaceMaps: visibleWorkspaces
-          .map((Workspace w) => w.toMap())
-          .toList(),
+      workspaceMaps: visibleWorkspaces.map((Workspace w) => w.toMap()).toList(),
       groupMaps: repository.groupsNotifier.value
           .where((ItemGroup g) => visibleWorkspaceIds.contains(g.workspaceId))
           .map((ItemGroup g) => g.toMap())
           .toList(),
-      tombstoneMaps: tombstones
-          .map((Tombstone t) => t.toMap())
-          .toList(),
+      tombstoneMaps: tombstones.map((Tombstone t) => t.toMap()).toList(),
       deviceClass: _deviceClass,
       vaultVersion: vaultVersion,
     );
@@ -729,8 +738,9 @@ class LanSyncService {
       switch (type) {
         case SyncMessageType.hello:
           // 服务端回敬的 hello：记录对端能力（v2），供后续发送过滤使用。
-          final PeerCapabilities? caps =
-              _protocolCodec.readHelloCapabilities(data);
+          final PeerCapabilities? caps = _protocolCodec.readHelloCapabilities(
+            data,
+          );
           if (caps != null) {
             _peerCaps[peer.id] = caps;
           }

@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import '../models/workspace.dart';
 import '../services/password_repository.dart';
 import '../utils/theme_config.dart';
+import '../widgets/shared/workspace_guard.dart';
+import '../widgets/workspace_management_tile.dart';
+import 'workspace_password_screen.dart';
 
 /// 工作区管理页：新建/编辑/删除/排序，配置同步策略。
 ///
@@ -20,8 +23,7 @@ class WorkspaceManagementScreen extends StatefulWidget {
       _WorkspaceManagementScreenState();
 }
 
-class _WorkspaceManagementScreenState
-    extends State<WorkspaceManagementScreen> {
+class _WorkspaceManagementScreenState extends State<WorkspaceManagementScreen> {
   final Map<String, int> _itemCounts = <String, int>{};
 
   @override
@@ -43,13 +45,20 @@ class _WorkspaceManagementScreenState
       counts[w.id] = await widget.repository.itemCountInWorkspace(w.id);
     }
     if (mounted) {
-      setState(() => _itemCounts
-        ..clear()
-        ..addAll(counts));
+      setState(
+        () => _itemCounts
+          ..clear()
+          ..addAll(counts),
+      );
     }
   }
 
   Future<void> _editWorkspace({Workspace? initial}) async {
+    if (initial != null &&
+        (!await authorizeWorkspace(context, widget.repository, initial.id) ||
+            !mounted)) {
+      return;
+    }
     final bool? saved = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
         builder: (_) => _WorkspaceEditPage(
@@ -65,6 +74,10 @@ class _WorkspaceManagementScreenState
   }
 
   Future<void> _deleteWorkspace(Workspace workspace) async {
+    if (!await authorizeWorkspace(context, widget.repository, workspace.id) ||
+        !mounted) {
+      return;
+    }
     final int count = _itemCounts[workspace.id] ?? 0;
     if (count > 0) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -118,77 +131,48 @@ class _WorkspaceManagementScreenState
 
   @override
   Widget build(BuildContext context) {
-    final List<Workspace> workspaces = widget.repository.workspacesNotifier.value;
+    final List<Workspace> workspaces =
+        widget.repository.workspacesNotifier.value;
 
     return Scaffold(
       appBar: AppBar(title: const Text('工作区管理')),
       body: workspaces.isEmpty
           ? const Center(child: Text('暂无工作区'))
           : ReorderableListView.builder(
+              buildDefaultDragHandles: false,
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 80),
               itemCount: workspaces.length,
-              onReorder: (int oldIndex, int newIndex) {
+              onReorderItem: (int oldIndex, int newIndex) {
                 final List<String> ids = workspaces
                     .map((Workspace w) => w.id)
                     .toList();
-                if (newIndex > oldIndex) newIndex -= 1;
                 ids.insert(newIndex, ids.removeAt(oldIndex));
                 widget.repository.reorderWorkspaces(ids);
               },
               itemBuilder: (BuildContext context, int index) {
                 final Workspace w = workspaces[index];
                 final int count = _itemCounts[w.id] ?? 0;
-                return Material(
+                return Padding(
                   key: ValueKey<String>(w.id),
-                  color: Colors.transparent,
-                  child: ListTile(
-                    contentPadding:
-                        const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                    leading: Text(
-                      w.icon ?? '📁',
-                      style: const TextStyle(fontSize: 26),
-                    ),
-                    title: Text(
-                      w.name,
-                      style: const TextStyle(
-                        color: ThemeConfig.textColor,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    subtitle: Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Row(
-                        children: <Widget>[
-                          _policyBadge(w.syncPolicy),
-                          const SizedBox(width: 8),
-                          Text(
-                            '$count 项',
-                            style: const TextStyle(
-                              color: ThemeConfig.hintTextColor,
-                              fontSize: ThemeConfig.fontSizeCaption,
-                            ),
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: WorkspaceManagementTile(
+                    workspace: w,
+                    itemCount: count,
+                    isProtected: widget.repository.access.isProtected(w.id),
+                    index: index,
+                    onEdit: () => _editWorkspace(initial: w),
+                    onDelete: () => _deleteWorkspace(w),
+                    onConfigureAccess: () async {
+                      await Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => WorkspacePasswordScreen(
+                            repository: widget.repository,
+                            workspace: w,
                           ),
-                        ],
-                      ),
-                    ),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        IconButton(
-                          icon: const Icon(Icons.edit_outlined, size: 20),
-                          color: ThemeConfig.secondaryTextColor,
-                          tooltip: '编辑',
-                          onPressed: () => _editWorkspace(initial: w),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.delete_outline, size: 20),
-                          color: ThemeConfig.dangerColor,
-                          tooltip: '删除',
-                          onPressed: () => _deleteWorkspace(w),
-                        ),
-                      ],
-                    ),
-                    onTap: () => _editWorkspace(initial: w),
+                      );
+                      if (mounted) setState(() {});
+                    },
                   ),
                 );
               },
@@ -197,36 +181,6 @@ class _WorkspaceManagementScreenState
         onPressed: () => _editWorkspace(),
         icon: const Icon(Icons.add),
         label: const Text('新建工作区'),
-      ),
-    );
-  }
-
-  static const Map<SyncPolicy, String> _policyLabels = <SyncPolicy, String>{
-    SyncPolicy.full: '全设备同步',
-    SyncPolicy.mobileOnly: '仅移动端',
-    SyncPolicy.localOnly: '仅本机',
-  };
-
-  Widget _policyBadge(SyncPolicy policy) {
-    final Color color = switch (policy) {
-      SyncPolicy.full => ThemeConfig.successColor,
-      SyncPolicy.mobileOnly => ThemeConfig.warningColor,
-      SyncPolicy.localOnly => ThemeConfig.dangerColor,
-    };
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(ThemeConfig.radiusPill),
-        border: Border.all(color: color.withValues(alpha: 0.4)),
-      ),
-      child: Text(
-        _policyLabels[policy] ?? '',
-        style: TextStyle(
-          color: color,
-          fontSize: ThemeConfig.fontSizeCaption,
-          fontWeight: FontWeight.w500,
-        ),
       ),
     );
   }
@@ -250,8 +204,18 @@ class _WorkspaceEditPage extends StatefulWidget {
 
 class _WorkspaceEditPageState extends State<_WorkspaceEditPage> {
   static const List<String> _iconPresets = <String>[
-    '🏠', '💼', '🔐', '🏦', '🌐', '⭐',
-    '🎮', '🛒', '📷', '💰', '✈️', '🎓',
+    '🏠',
+    '💼',
+    '🔐',
+    '🏦',
+    '🌐',
+    '⭐',
+    '🎮',
+    '🛒',
+    '📷',
+    '💰',
+    '✈️',
+    '🎓',
   ];
 
   late final TextEditingController _nameController;
@@ -275,20 +239,14 @@ class _WorkspaceEditPageState extends State<_WorkspaceEditPage> {
 
   static const Map<SyncPolicy, (String, String)> _policyDescriptions =
       <SyncPolicy, (String, String)>{
-    SyncPolicy.full: (
-      '全设备同步',
-      '在所有已配对设备间同步，适合普通账号。',
-    ),
-    SyncPolicy.mobileOnly: (
-      '仅移动端',
-      '只在手机/平板之间同步，永远不会发送到电脑——'
-          '包括工作区名称。适合银行、密钥等高隐私条目。',
-    ),
-    SyncPolicy.localOnly: (
-      '仅本机',
-      '只保存在这台设备上，不参与任何同步。',
-    ),
-  };
+        SyncPolicy.full: ('全设备同步', '在所有已配对设备间同步，适合普通账号。'),
+        SyncPolicy.mobileOnly: (
+          '仅移动端',
+          '只在手机/平板之间同步，永远不会发送到电脑——'
+              '包括工作区名称。适合银行、密钥等高隐私条目。',
+        ),
+        SyncPolicy.localOnly: ('仅本机', '只保存在这台设备上，不参与任何同步。'),
+      };
 
   Future<bool> _confirmNarrowing(SyncPolicy from, SyncPolicy to) async {
     if (from == to) return true;
@@ -300,8 +258,7 @@ class _WorkspaceEditPageState extends State<_WorkspaceEditPage> {
     };
     if (!broader) return true;
 
-    final String target =
-        to == SyncPolicy.mobileOnly ? '电脑端' : '其它所有设备';
+    final String target = to == SyncPolicy.mobileOnly ? '电脑端' : '其它所有设备';
     final bool? confirmed = await showDialog<bool>(
       context: context,
       builder: (BuildContext context) => AlertDialog(
@@ -326,6 +283,15 @@ class _WorkspaceEditPageState extends State<_WorkspaceEditPage> {
   }
 
   Future<void> _save() async {
+    if (widget.initial != null &&
+        (!await authorizeWorkspace(
+              context,
+              widget.repository,
+              widget.initial!.id,
+            ) ||
+            !mounted)) {
+      return;
+    }
     final String name = _nameController.text.trim();
     if (name.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -340,8 +306,7 @@ class _WorkspaceEditPageState extends State<_WorkspaceEditPage> {
 
     // 同名检查（不同 id 视为不同工作区）。
     final bool nameExists = widget.repository.workspacesNotifier.value.any(
-      (Workspace w) =>
-          w.id != widget.initial?.id && w.name == name,
+      (Workspace w) => w.id != widget.initial?.id && w.name == name,
     );
     if (nameExists) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -431,8 +396,7 @@ class _WorkspaceEditPageState extends State<_WorkspaceEditPage> {
                       color: _icon == emoji
                           ? ThemeConfig.primarySoft
                           : ThemeConfig.fillColor,
-                      borderRadius:
-                          BorderRadius.circular(ThemeConfig.radiusMd),
+                      borderRadius: BorderRadius.circular(ThemeConfig.radiusMd),
                       border: Border.all(
                         color: _icon == emoji
                             ? ThemeConfig.primaryColor

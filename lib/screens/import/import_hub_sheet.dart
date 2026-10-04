@@ -5,6 +5,9 @@ import '../../services/password_repository.dart';
 import '../../utils/theme_config.dart';
 import 'qr_scan_screen.dart';
 import 'screenshot_import_screen.dart';
+import 'chrome_import_screen.dart';
+import '../../models/workspace.dart';
+import '../../widgets/shared/workspace_guard.dart';
 
 /// 导入来源。
 enum ImportSource { file, qr, screenshot }
@@ -19,9 +22,11 @@ class ImportHubSheet extends StatelessWidget {
     required this.repository,
     required this.onPickFile,
     required this.onResult,
+    this.initialWorkspaceId = Workspace.defaultId,
   });
 
   final PasswordRepository repository;
+  final String initialWorkspaceId;
 
   /// 用户选择「从文件导入」时触发（由 HomeScreen 执行既有 JSON 流程）。
   final VoidCallback onPickFile;
@@ -35,6 +40,7 @@ class ImportHubSheet extends StatelessWidget {
     required PasswordRepository repository,
     required VoidCallback onPickFile,
     required void Function(String? message) onResult,
+    String initialWorkspaceId = Workspace.defaultId,
   }) {
     return showModalBottomSheet<void>(
       context: context,
@@ -48,6 +54,7 @@ class ImportHubSheet extends StatelessWidget {
         repository: repository,
         onPickFile: onPickFile,
         onResult: onResult,
+        initialWorkspaceId: initialWorkspaceId,
       ),
     );
   }
@@ -120,6 +127,15 @@ class ImportHubSheet extends StatelessWidget {
                 Navigator.of(context).pop();
                 onPickFile();
               },
+            ),
+            _EntryTile(
+              icon: Icons.language,
+              title: '从 Chrome 导入',
+              subtitle: 'Chrome 导出的 CSV，可预览和处理重复项',
+              onTap: () => _go(context, () => ChromeImportScreen(
+                repository: repository, initialWorkspaceId: initialWorkspaceId,
+                authorizeWorkspace: (id) => authorizeWorkspace(context, repository, id),
+              )),
             ),
             _EntryTile(
               icon: Icons.qr_code_scanner,

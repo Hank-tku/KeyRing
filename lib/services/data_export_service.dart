@@ -47,6 +47,7 @@ class DataExportService {
     List<PasswordItem> items, {
     List<Workspace>? workspaces,
     List<ItemGroup>? groups,
+    bool Function()? isAuthorized,
   }) async {
     final Directory directory = await _resolveExportDirectory();
     if (!await directory.exists()) {
@@ -76,6 +77,7 @@ class DataExportService {
     };
 
     const JsonEncoder encoder = JsonEncoder.withIndent('  ');
+    if (isAuthorized != null && !isAuthorized()) throw StateError('访问授权已失效');
     await File(filePath).writeAsString(encoder.convert(payload));
     return DataExportResult(path: filePath, itemCount: items.length);
   }

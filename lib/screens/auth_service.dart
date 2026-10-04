@@ -46,10 +46,12 @@ class AuthService {
   }
 
   // 新增：执行系统密码验证（允许使用设备密码）
-  Future<bool> authenticateWithSystemPassword() async {
+  Future<bool> authenticateWithSystemPassword({
+    String reason = '请使用指纹、面容或设备密码解锁 KeyRing',
+  }) async {
     try {
       return await _localAuth.authenticate(
-        localizedReason: '请使用系统密码解锁应用',
+        localizedReason: reason,
         options: const AuthenticationOptions(
           biometricOnly: false, // 设置为 false 允许使用设备密码
           useErrorDialogs: true,

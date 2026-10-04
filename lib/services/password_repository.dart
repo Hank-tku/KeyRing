@@ -1,5 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'workspace_access_service.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart'
@@ -35,16 +39,28 @@ class SyncApplyResult {
   int get touched => added + updated + deleted;
 }
 
+class ImportSnapshotChanged implements Exception {}
+
 class PasswordRepository {
   /// [dbPathOverride] 仅供测试注入内存/临时数据库路径。
-  PasswordRepository({String? dbPathOverride}) : _dbPathOverride = dbPathOverride;
+  PasswordRepository({
+    String? dbPathOverride,
+    WorkspaceCredentialStore? credentialStore,
+  }) : _dbPathOverride = dbPathOverride,
+       _credentialStore = credentialStore;
+  final WorkspaceCredentialStore? _credentialStore;
 
   static const String _dbName = 'KeyRing.db';
   static const String _table = 'password_items';
   static const String _workspaceTable = 'workspaces';
   static const String _groupTable = 'item_groups';
   static const String _tombstoneTable = 'tombstones';
-  static const int _dbVersion = 2;
+  static const int _dbVersion = 3;
+
+  late final WorkspaceAccessService access = WorkspaceAccessService(
+    persistProtection: _persistProtection,
+    store: _credentialStore,
+  );
 
   final String? _dbPathOverride;
 
@@ -66,9 +82,13 @@ class PasswordRepository {
         if (oldVersion < 2) {
           await _upgradeToV2(db);
         }
+        if (oldVersion < 3) await _createAccessTable(db);
       },
     );
     await _ensureDefaultWorkspace();
+    final locks = await _db!.query('local_workspace_locks');
+    access.initialize(locks.map((row) => row['workspaceId'] as String));
+    await access.loadModes();
     await _reloadAll();
   }
 
@@ -96,6 +116,7 @@ class PasswordRepository {
       'CREATE INDEX IF NOT EXISTS idx_${_table}_workspace ON $_table(workspaceId)',
     );
     await _createWorkspaceTables(db);
+    await _createAccessTable(db);
   }
 
   /// v1 → v2：项目首个结构迁移（调用前 main 已完成整库备份）。
@@ -160,7 +181,35 @@ class PasswordRepository {
     );
   }
 
+  Future<void> _createAccessTable(Database db) => db.execute(
+    'CREATE TABLE IF NOT EXISTS local_workspace_locks (workspaceId TEXT PRIMARY KEY)',
+  );
+
+  Future<void> _persistProtection(String id, bool enabled) async {
+    if (enabled) {
+      await _db!.insert('local_workspace_locks', {
+        'workspaceId': id,
+      }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    } else {
+      await _db!.delete(
+        'local_workspace_locks',
+        where: 'workspaceId = ?',
+        whereArgs: [id],
+      );
+    }
+    await refreshAutofill();
+  }
+
+  Future<void> refreshAutofill() async {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+      await const MethodChannel(
+        'keyring/autofill',
+      ).invokeMethod<void>('refresh', await databasePath());
+    }
+  }
+
   Future<void> dispose() async {
+    access.dispose();
     await _db?.close();
   }
 
@@ -177,6 +226,7 @@ class PasswordRepository {
         .map((Map<String, Object?> row) => PasswordItem.fromMap(row))
         .toList();
     itemsNotifier.value = items;
+    await refreshAutofill();
   }
 
   Future<void> _reloadWorkspaces() async {
@@ -267,7 +317,20 @@ class PasswordRepository {
     return row;
   }
 
+  void _requireAccess(String id) {
+    final workspaceId = id.isEmpty ? Workspace.defaultId : id;
+    if (!access.canAccess(workspaceId)) throw StateError('请先解锁工作区');
+  }
+
+  void _requireItemAccess(PasswordItem item) {
+    _requireAccess(item.workspaceId);
+    for (final existing in itemsNotifier.value.where((x) => x.id == item.id)) {
+      _requireAccess(existing.workspaceId);
+    }
+  }
+
   Future<void> addItem(PasswordItem item) async {
+    _requireItemAccess(item);
     item.updatedAt = DateTime.now();
     await _db!.insert(
       _table,
@@ -278,6 +341,7 @@ class PasswordRepository {
   }
 
   Future<void> updateItem(PasswordItem item) async {
+    _requireItemAccess(item);
     item.updatedAt = DateTime.now();
     await _db!.update(
       _table,
@@ -290,10 +354,16 @@ class PasswordRepository {
   }
 
   Future<void> removeItem(String id) async {
+    final item = await getByIdAsync(id);
+    if (item != null) _requireItemAccess(item);
     await _db!.transaction((Transaction txn) async {
       await txn.delete(_table, where: 'id = ?', whereArgs: <Object?>[id]);
-      await _recordTombstone(txn, id, isWorkspace: false,
-          scope: TombstoneScope.all);
+      await _recordTombstone(
+        txn,
+        id,
+        isWorkspace: false,
+        scope: TombstoneScope.all,
+      );
     });
     await _reloadItems();
   }
@@ -302,9 +372,15 @@ class PasswordRepository {
   ///
   /// 移动进入对端「看不见」的工作区时，对端会残留旧副本：写墓碑让旧副本
   /// 在对端被删除（仅 id）。移回全同步工作区无需墓碑，下次同步 upsert 复活。
-  Future<void> moveItem(String id, String workspaceId, {String? groupId}) async {
+  Future<void> moveItem(
+    String id,
+    String workspaceId, {
+    String? groupId,
+  }) async {
     final PasswordItem? item = await getByIdAsync(id);
     if (item == null) return;
+    _requireItemAccess(item);
+    _requireAccess(workspaceId);
     final Workspace? source = _findWorkspace(item.workspaceId);
     final Workspace? dest = _findWorkspace(workspaceId);
     if (dest == null) return;
@@ -361,8 +437,10 @@ class PasswordRepository {
     DatabaseExecutor txn,
     Map<String, dynamic> raw,
   ) async {
-    final Map<String, Object?>? localRow =
-        await _findRowFor(txn, raw['id'] as String);
+    final Map<String, Object?>? localRow = await _findRowFor(
+      txn,
+      raw['id'] as String,
+    );
     final PasswordItem merged = _mergeMissingColumns(raw, localRow);
     // 条目级路径（QR/OCR/旧导出解析后）无法区分「清空保密项」与「未携带」：
     // 空列表一律保留本地值，防止 v1 来源数据抹掉保密项。
@@ -411,8 +489,8 @@ class PasswordRepository {
           ? parsed.workspaceId
           : local.workspaceId,
       groupId: raw.containsKey('groupId') ? parsed.groupId : local.groupId,
-      customFields: !raw.containsKey('customFields') &&
-              local.customFields.isNotEmpty
+      customFields:
+          !raw.containsKey('customFields') && local.customFields.isNotEmpty
           ? local.customFields
           : parsed.customFields,
     );
@@ -420,6 +498,7 @@ class PasswordRepository {
 
   /// 导入单条条目，保留条目自带的 createdAt/updatedAt。
   Future<void> importItem(PasswordItem item, {bool batch = false}) async {
+    _requireItemAccess(item);
     await _db!.transaction((Transaction txn) async {
       await _upsertItemPreserving(txn, item.toMap());
     });
@@ -428,13 +507,94 @@ class PasswordRepository {
     }
   }
 
-  /// 批量导入：单事务写入，结束后统一刷新一次。
-  Future<int> importItems(Iterable<PasswordItem> items) async {
-    final List<PasswordItem> list = items.toList();
+  String importSnapshot(String workspaceId) => _importSnapshot(
+    workspaceId,
+    itemsNotifier.value,
+    workspacesNotifier.value,
+    groupsNotifier.value,
+  );
+
+  String _importSnapshot(
+    String workspaceId,
+    Iterable<PasswordItem> items,
+    Iterable<Workspace> workspaces,
+    Iterable<ItemGroup> groups,
+  ) {
+    List<Map<String, dynamic>> sorted(Iterable<Map<String, dynamic>> rows) =>
+        rows.toList()
+          ..sort((a, b) => (a['id'] as String).compareTo(b['id'] as String));
+    return sha256
+        .convert(
+          utf8.encode(
+            jsonEncode([
+              sorted(
+                items
+                    .where((x) => x.workspaceId == workspaceId)
+                    .map((x) => x.toMap()),
+              ),
+              sorted(
+                workspaces
+                    .where((x) => x.id == workspaceId)
+                    .map((x) => x.toMap()),
+              ),
+              sorted(
+                groups
+                    .where((x) => x.workspaceId == workspaceId)
+                    .map((x) => x.toMap()),
+              ),
+            ]),
+          ),
+        )
+        .toString();
+  }
+
+  /// Batch writes validate the preview against SQLite inside the same transaction.
+  Future<int> importItems(
+    Iterable<PasswordItem> items, {
+    String? expectedWorkspaceId,
+    String? expectedSnapshot,
+  }) async {
+    final list = items.toList();
     if (list.isEmpty) return 0;
+    final generation = access.generation;
     await _db!.transaction((Transaction txn) async {
-      for (final PasswordItem item in list) {
+      if (expectedSnapshot != null && expectedWorkspaceId != null) {
+        final ws = expectedWorkspaceId;
+        final actual = _importSnapshot(
+          ws,
+          (await txn.query(
+            _table,
+            where: 'workspaceId = ?',
+            whereArgs: [ws],
+          )).map(PasswordItem.fromMap),
+          (await txn.query(
+            _workspaceTable,
+            where: 'id = ?',
+            whereArgs: [ws],
+          )).map(Workspace.fromMap),
+          (await txn.query(
+            _groupTable,
+            where: 'workspaceId = ?',
+            whereArgs: [ws],
+          )).map(ItemGroup.fromMap),
+        );
+        if (actual != expectedSnapshot) throw ImportSnapshotChanged();
+      }
+      for (final item in list) {
+        _requireItemAccess(item);
+        final existing = await txn.query(
+          _table,
+          where: 'id = ?',
+          whereArgs: [item.id],
+        );
+        if (existing.isNotEmpty) {
+          _requireAccess(existing.single['workspaceId'] as String);
+        }
         await _upsertItemPreserving(txn, item.toMap());
+      }
+      if (generation != access.generation) throw StateError('工作区授权已失效');
+      for (final item in list) {
+        _requireItemAccess(item);
       }
     });
     await _reloadItems();
@@ -457,6 +617,7 @@ class PasswordRepository {
   /// 更新工作区。策略收窄（full→mobileOnly / 任何→localOnly）会写工作区
   /// 墓碑，让已同步过该工作区的对端删除对应数据。
   Future<void> updateWorkspace(Workspace updated) async {
+    _requireAccess(updated.id);
     final Workspace? old = _findWorkspace(updated.id);
     updated.updatedAt = DateTime.now();
     await _db!.transaction((Transaction txn) async {
@@ -467,14 +628,20 @@ class PasswordRepository {
         whereArgs: <Object?>[updated.id],
       );
       if (old != null && old.syncPolicy != updated.syncPolicy) {
-        final bool narrowed = old.syncPolicy == SyncPolicy.full ||
+        final bool narrowed =
+            old.syncPolicy == SyncPolicy.full ||
             updated.syncPolicy == SyncPolicy.localOnly;
         if (narrowed) {
-          final TombstoneScope scope = updated.syncPolicy == SyncPolicy.mobileOnly
+          final TombstoneScope scope =
+              updated.syncPolicy == SyncPolicy.mobileOnly
               ? TombstoneScope.desktopOnly
               : TombstoneScope.all;
-          await _recordTombstone(txn, updated.id,
-              isWorkspace: true, scope: scope);
+          await _recordTombstone(
+            txn,
+            updated.id,
+            isWorkspace: true,
+            scope: scope,
+          );
         }
       }
     });
@@ -483,16 +650,30 @@ class PasswordRepository {
 
   /// 删除工作区（必须已清空条目）。墓碑 scope=all：所有对端一并删除。
   Future<void> deleteWorkspace(String id) async {
+    _requireAccess(id);
     final int count = await itemCountInWorkspace(id);
     if (count > 0) {
       throw StateError('工作区内仍有 $count 个条目，请先移动或删除');
     }
     await _db!.transaction((Transaction txn) async {
-      await txn
-          .delete(_groupTable, where: 'workspaceId = ?', whereArgs: <Object?>[id]);
-      await txn.delete(_workspaceTable, where: 'id = ?', whereArgs: <Object?>[id]);
-      await _recordTombstone(txn, id, isWorkspace: true, scope: TombstoneScope.all);
+      await txn.delete(
+        _groupTable,
+        where: 'workspaceId = ?',
+        whereArgs: <Object?>[id],
+      );
+      await txn.delete(
+        _workspaceTable,
+        where: 'id = ?',
+        whereArgs: <Object?>[id],
+      );
+      await _recordTombstone(
+        txn,
+        id,
+        isWorkspace: true,
+        scope: TombstoneScope.all,
+      );
     });
+    await access.forgetDeletedWorkspace(id);
     await _reloadWorkspaces();
     await _reloadGroups();
   }
@@ -512,6 +693,7 @@ class PasswordRepository {
   }
 
   Future<ItemGroup> addGroup(String workspaceId, String name) async {
+    _requireAccess(workspaceId);
     final ItemGroup group = ItemGroup(
       id: const Uuid().v4(),
       workspaceId: workspaceId,
@@ -527,6 +709,7 @@ class PasswordRepository {
   }
 
   Future<void> updateGroup(ItemGroup updated) async {
+    _requireAccess(updated.workspaceId);
     updated.updatedAt = DateTime.now();
     await _db!.update(
       _groupTable,
@@ -539,6 +722,8 @@ class PasswordRepository {
 
   /// 删除分组：条目回落未分组，不产生墓碑（条目本身未被删除）。
   Future<void> deleteGroup(String id) async {
+    final group = groupsNotifier.value.where((g) => g.id == id).firstOrNull;
+    if (group != null) _requireAccess(group.workspaceId);
     await _db!.transaction((Transaction txn) async {
       await txn.update(
         _table,
@@ -562,16 +747,12 @@ class PasswordRepository {
     required bool isWorkspace,
     required TombstoneScope scope,
   }) async {
-    await txn.insert(
-      _tombstoneTable,
-      <String, Object?>{
-        'id': id,
-        'kind': isWorkspace ? 'workspace' : 'item',
-        'scope': scope.wireName,
-        'deletedAt': DateTime.now().toIso8601String(),
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await txn.insert(_tombstoneTable, <String, Object?>{
+      'id': id,
+      'kind': isWorkspace ? 'workspace' : 'item',
+      'scope': scope.wireName,
+      'deletedAt': DateTime.now().toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   /// 取应发送给指定设备类的墓碑（发送侧过滤）。
@@ -657,32 +838,36 @@ class PasswordRepository {
         final Tombstone t = Tombstone.fromMap(raw);
         if (t.id.isEmpty) continue;
         if (t.isWorkspace) {
-          await txn.delete(_groupTable,
-              where: 'workspaceId = ?', whereArgs: <Object?>[t.id]);
-          await txn.delete(_table,
-              where: 'workspaceId = ?', whereArgs: <Object?>[t.id]);
-          await txn.delete(_workspaceTable,
-              where: 'id = ?', whereArgs: <Object?>[t.id]);
+          await txn.delete(
+            _groupTable,
+            where: 'workspaceId = ?',
+            whereArgs: <Object?>[t.id],
+          );
+          await txn.delete(
+            _table,
+            where: 'workspaceId = ?',
+            whereArgs: <Object?>[t.id],
+          );
+          await txn.delete(
+            _workspaceTable,
+            where: 'id = ?',
+            whereArgs: <Object?>[t.id],
+          );
         } else {
           await txn.delete(_table, where: 'id = ?', whereArgs: <Object?>[t.id]);
         }
         // 记录到本地墓碑表，继续向其它对端传播（scope 原样保留）。
-        await txn.insert(
-          _tombstoneTable,
-          <String, Object?>{
-            'id': t.id,
-            'kind': t.isWorkspace ? 'workspace' : 'item',
-            'scope': t.scope.wireName,
-            'deletedAt': t.deletedAt.toIso8601String(),
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
+        await txn.insert(_tombstoneTable, <String, Object?>{
+          'id': t.id,
+          'kind': t.isWorkspace ? 'workspace' : 'item',
+          'scope': t.scope.wireName,
+          'deletedAt': t.deletedAt.toIso8601String(),
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
 
       // 2. 工作区：LWW upsert；桌面端拒收 mobile_only（接收侧防御）。
       final Set<String> knownWorkspaceIds = <String>{
-        for (final Map<String, Object?> row
-            in await txn.query(_workspaceTable))
+        for (final Map<String, Object?> row in await txn.query(_workspaceTable))
           row['id'].toString(),
       };
       for (final Map<String, dynamic> raw in rawWorkspaces) {
@@ -701,7 +886,11 @@ class PasswordRepository {
         if (rows.isNotEmpty) {
           final Workspace local = Workspace.fromMap(rows.first);
           if (!remote.updatedAt.isAfter(local.updatedAt)) continue;
-          if (await _hasNewerWorkspaceTombstone(txn, remote.id, remote.updatedAt)) {
+          if (await _hasNewerWorkspaceTombstone(
+            txn,
+            remote.id,
+            remote.updatedAt,
+          )) {
             continue;
           }
         }
@@ -744,9 +933,12 @@ class PasswordRepository {
         final String? id = raw['id']?.toString();
         if (id == null || id.isEmpty) continue;
 
-        if (await _hasNewerTombstone(txn, id,
-            DateTime.tryParse(raw['updatedAt']?.toString() ?? '') ??
-                DateTime.now())) {
+        if (await _hasNewerTombstone(
+          txn,
+          id,
+          DateTime.tryParse(raw['updatedAt']?.toString() ?? '') ??
+              DateTime.now(),
+        )) {
           deleted++;
           continue;
         }

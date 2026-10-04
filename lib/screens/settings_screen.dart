@@ -39,8 +39,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// 修饰键本身的物理键：录制器在"只按住修饰键还没按主键"时也会回调，
   /// 这些过渡事件直接忽略，等用户继续按主键。
   /// （PhysicalKeyboardKey 重载了 ==，不能放进 const 集合。）
-  static final Set<PhysicalKeyboardKey> _modifierKeys =
-      <PhysicalKeyboardKey>{
+  static final Set<PhysicalKeyboardKey> _modifierKeys = <PhysicalKeyboardKey>{
     PhysicalKeyboardKey.controlLeft,
     PhysicalKeyboardKey.controlRight,
     PhysicalKeyboardKey.shiftLeft,
@@ -63,8 +62,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     setState(() => _saving = true);
-    final HotkeyRegisterStatus status =
-        await widget.hotkeyService.rebind(newConfig);
+    final HotkeyRegisterStatus status = await widget.hotkeyService.rebind(
+      newConfig,
+    );
     if (!mounted) return;
     setState(() => _saving = false);
     switch (status) {
@@ -105,8 +105,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        backgroundColor:
-            success ? ThemeConfig.successColor : ThemeConfig.dangerColor,
+        backgroundColor: success
+            ? ThemeConfig.successColor
+            : ThemeConfig.dangerColor,
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -130,6 +131,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(ThemeConfig.space16),
         children: <Widget>[
+          const ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.lock_clock_outlined),
+            title: Text('后台自动锁定'),
+            subtitle: Text('离开 KeyRing 满 2 分钟后锁定；短暂切走再返回可继续使用。'),
+          ),
+          const SizedBox(height: ThemeConfig.space16),
           const Text(
             '全局快捷键',
             style: TextStyle(
@@ -397,8 +405,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           style: TextStyle(
                             color: switch (w.syncPolicy) {
                               SyncPolicy.full => ThemeConfig.successColor,
-                              SyncPolicy.mobileOnly =>
-                                ThemeConfig.warningColor,
+                              SyncPolicy.mobileOnly => ThemeConfig.warningColor,
                               SyncPolicy.localOnly => ThemeConfig.dangerColor,
                             },
                             fontSize: ThemeConfig.fontSizeCaption,
@@ -420,8 +427,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       key: config.key,
       modifiers: <HotKeyModifier>[
         for (final String name in config.modifiers)
-          if (HotKeyModifier.values
-              .any((HotKeyModifier m) => m.name == name))
+          if (HotKeyModifier.values.any((HotKeyModifier m) => m.name == name))
             HotKeyModifier.values.firstWhere(
               (HotKeyModifier m) => m.name == name,
             ),

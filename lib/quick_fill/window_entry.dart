@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
@@ -38,12 +39,12 @@ class _Entry {
   const _Entry(this.id, this.title, this.username, this.url, this.workspace);
 
   factory _Entry.fromJson(Map<String, dynamic> json) => _Entry(
-        json['id'] as String? ?? '',
-        json['title'] as String? ?? '',
-        json['username'] as String? ?? '',
-        json['url'] as String? ?? '',
-        json['workspace'] as String? ?? '',
-      );
+    json['id'] as String? ?? '',
+    json['title'] as String? ?? '',
+    json['username'] as String? ?? '',
+    json['url'] as String? ?? '',
+    json['workspace'] as String? ?? '',
+  );
 
   final String id;
   final String title;
@@ -83,6 +84,11 @@ class _QuickFillWindowPageState extends State<QuickFillWindowPage>
 
   List<_Entry> _entries = <_Entry>[];
   bool _loaded = false;
+  bool _locked = true;
+  bool _authenticating = false;
+  int _requestGeneration = 0;
+  List<Map<String, dynamic>> _lockedWorkspaces = [];
+  static const _platformChannel = MethodChannel('keyring/quickfill_window');
   int _selectedIndex = 0;
 
   /// 底部提示行文案（填充失败原因等），null 时显示操作提示。
@@ -99,6 +105,9 @@ class _QuickFillWindowPageState extends State<QuickFillWindowPage>
       if (mounted) setState(() => _selectedIndex = 0);
     });
     _searchFocus = FocusNode(onKeyEvent: _onSearchKey);
+    _platformChannel.setMethodCallHandler((call) async {
+      if (call.method == 'blur' && !_authenticating) await _hide();
+    });
     _boot();
   }
 
@@ -106,6 +115,7 @@ class _QuickFillWindowPageState extends State<QuickFillWindowPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _idleTimer?.cancel();
+    _platformChannel.setMethodCallHandler(null);
     _footerTimer?.cancel();
     _searchCtrl.dispose();
     _scrollCtrl.dispose();
@@ -168,26 +178,139 @@ class _QuickFillWindowPageState extends State<QuickFillWindowPage>
   }
 
   Future<void> _fetchEntries() async {
-    try {
-      final String? raw =
-          await _controller?.invokeMethod<String>('requestItems');
-      if (raw == null) return;
-      final dynamic decoded = jsonDecode(raw);
-      if (decoded is! List) return;
-      if (!mounted) return;
+    final generation = ++_requestGeneration;
+    if (mounted) {
       setState(() {
-        _entries = <_Entry>[
-          for (final dynamic e in decoded)
-            if (e is Map<String, dynamic>) _Entry.fromJson(e),
+        _entries = [];
+        _lockedWorkspaces = [];
+        _loaded = false;
+      });
+    }
+    try {
+      final raw = await _controller?.invokeMethod<String>('requestItems');
+      if (!mounted || generation != _requestGeneration) return;
+      if (raw == null) throw StateError('host unavailable');
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      setState(() {
+        _locked = decoded['locked'] == true;
+        _entries = [
+          for (final e in decoded['items'] as List)
+            _Entry.fromJson(Map<String, dynamic>.from(e as Map)),
+        ];
+        _lockedWorkspaces = [
+          for (final w in decoded['workspaces'] as List)
+            Map<String, dynamic>.from(w as Map),
         ];
         _loaded = true;
-        if (_selectedIndex >= _filtered.length) _selectedIndex = 0;
+        _selectedIndex = 0;
       });
-    } catch (e) {
-      // 主窗口不可达（正在关闭等）：保持空列表。
-      debugPrint('QuickFill fetch error: $e');
-      if (mounted) setState(() => _loaded = true);
+    } catch (_) {
+      if (mounted && generation == _requestGeneration) {
+        setState(() {
+          _loaded = true;
+          _locked = true;
+        });
+      }
     }
+  }
+
+  Future<void> _unlockApp() async {
+    if (_authenticating) return;
+    setState(() => _authenticating = true);
+    _idleTimer?.cancel();
+    try {
+      final ok = await _controller?.invokeMethod<bool>('unlockApp') ?? false;
+      if (!mounted) return;
+      if (!ok) setState(() => _footerMessage = '验证未完成，请重试');
+      await _fetchEntries();
+    } finally {
+      if (mounted) setState(() => _authenticating = false);
+      _pokeIdleTimer();
+    }
+  }
+
+  Future<void> _unlockWorkspace(Map<String, dynamic> workspace) async {
+    if (_authenticating) return;
+    _authenticating = true;
+    _idleTimer?.cancel();
+    if (workspace['mode'] == 'system') {
+      try {
+        final ok =
+            await _controller?.invokeMethod<bool>('unlockWorkspace', {
+              'id': workspace['id'],
+            }) ??
+            false;
+        if (mounted && !ok) setState(() => _footerMessage = '系统验证未完成');
+      } catch (_) {
+        if (mounted) setState(() => _footerMessage = '暂时无法进行系统验证');
+      } finally {
+        _authenticating = false;
+        await _fetchEntries();
+        _pokeIdleTimer();
+      }
+      return;
+    }
+    final password = TextEditingController();
+    bool busy = false;
+    bool accepted = false;
+    String? error;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, update) => AlertDialog(
+          title: Text('解锁 ${workspace['name']}'),
+          content: TextField(
+            controller: password,
+            autofocus: true,
+            obscureText: true,
+            enabled: !busy,
+            decoration: InputDecoration(labelText: '本机工作区密码', errorText: error),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: busy
+                  ? null
+                  : () async {
+                      update(() => busy = true);
+                      final ok =
+                          await _controller?.invokeMethod<bool>(
+                            'unlockWorkspace',
+                            {'id': workspace['id'], 'password': password.text},
+                          ) ??
+                          false;
+                      if (!dialogContext.mounted) return;
+                      if (ok) {
+                        accepted = true;
+                        Navigator.pop(dialogContext);
+                      } else {
+                        update(() {
+                          busy = false;
+                          error = '密码错误、暂时冷却或应用已锁定';
+                        });
+                      }
+                    },
+              child: Text(busy ? '验证中…' : '解锁'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!accepted) {
+      await _controller?.invokeMethod<void>(
+        'cancelWorkspaceUnlock',
+        workspace['id'],
+      );
+    }
+    // Dialog disposal follows the exit animation.
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    password.dispose();
+    _authenticating = false;
+    await _fetchEntries();
+    _pokeIdleTimer();
   }
 
   /// 搜索框聚焦时拦截 ↑↓/回车/Esc。
@@ -200,7 +323,7 @@ class _QuickFillWindowPageState extends State<QuickFillWindowPage>
     final List<_Entry> list = _filtered;
     switch (event.logicalKey) {
       case LogicalKeyboardKey.escape:
-        _hide();
+        _hide(restoreTarget: true);
         return KeyEventResult.handled;
       case LogicalKeyboardKey.arrowDown:
         if (list.isNotEmpty) _moveSelection(1, list.length);
@@ -240,33 +363,33 @@ class _QuickFillWindowPageState extends State<QuickFillWindowPage>
     }
   }
 
-  Future<void> _hide() async {
+  Future<void> _hide({bool restoreTarget = false}) async {
+    if (_authenticating) return;
     _idleTimer?.cancel();
+    _requestGeneration++;
     _searchCtrl.clear();
     if (mounted) {
       setState(() {
+        _entries = [];
+        _lockedWorkspaces = [];
         _selectedIndex = 0;
         _footerMessage = null;
       });
     }
-    // 通知宿主同步显隐状态，否则下次热键 toggle 会走错分支。
-    unawaited(_controller?.invokeMethod<void>('panelHidden'));
-    await _controller?.hide();
+    await _controller?.invokeMethod<void>('panelHidden', restoreTarget);
   }
 
   Future<void> _fill(_Entry entry) async {
     _idleTimer?.cancel();
     try {
       await _controller?.invokeMethod<void>('fill', entry.id);
-    } catch (_) {
-      // 忽略：主窗口侧会处理失败反馈。
-    }
-    await _hide();
+    } catch (_) {}
   }
 
   /// 10 秒无操作自动隐藏。
   void _pokeIdleTimer() {
     _idleTimer?.cancel();
+    if (_authenticating) return;
     _idleTimer = Timer(_idleTimeout, () {
       if (mounted) _hide();
     });
@@ -275,10 +398,12 @@ class _QuickFillWindowPageState extends State<QuickFillWindowPage>
   /// 失焦自动隐藏（用户点了别处）。
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (Platform.isMacOS || _authenticating) return;
     if (state != AppLifecycleState.resumed) {
       // inactive：窗口失去键盘焦点。稍等一拍避免误触发。
       Timer(const Duration(milliseconds: 150), () {
-        if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        if (WidgetsBinding.instance.lifecycleState !=
+            AppLifecycleState.resumed) {
           _hide();
         }
       });
@@ -289,24 +414,29 @@ class _QuickFillWindowPageState extends State<QuickFillWindowPage>
     if (_searchCtrl.text.trim().isEmpty) return _entries;
     final String q = _searchCtrl.text.trim().toLowerCase();
     return _entries
-        .where((_Entry e) =>
-            e.title.toLowerCase().contains(q) ||
-            e.username.toLowerCase().contains(q) ||
-            e.url.toLowerCase().contains(q))
+        .where(
+          (_Entry e) =>
+              e.title.toLowerCase().contains(q) ||
+              e.username.toLowerCase().contains(q) ||
+              e.url.toLowerCase().contains(q),
+        )
         .toList();
   }
 
   @override
   Widget build(BuildContext context) {
     final List<_Entry> list = _filtered;
-    final int selected = list.isEmpty ? 0 : _selectedIndex.clamp(0, list.length - 1);
+    final int selected = list.isEmpty
+        ? 0
+        : _selectedIndex.clamp(0, list.length - 1);
 
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: CallbackShortcuts(
         bindings: <ShortcutActivator, VoidCallback>{
           // 兜底（焦点在列表项等非搜索框控件时）。
-          const SingleActivator(LogicalKeyboardKey.escape): _hide,
+          const SingleActivator(LogicalKeyboardKey.escape): () =>
+              _hide(restoreTarget: true),
         },
         child: Container(
           decoration: BoxDecoration(
@@ -341,6 +471,30 @@ class _QuickFillWindowPageState extends State<QuickFillWindowPage>
                   ),
                 ),
               ),
+              if (_loaded && _locked)
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: FilledButton.icon(
+                    onPressed: _authenticating ? null : _unlockApp,
+                    icon: const Icon(Icons.lock_outline),
+                    label: Text(_authenticating ? '验证中…' : '解锁 KeyRing'),
+                  ),
+                ),
+              if (_loaded && !_locked && _lockedWorkspaces.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Wrap(
+                    spacing: 8,
+                    children: [
+                      for (final w in _lockedWorkspaces)
+                        ActionChip(
+                          avatar: const Icon(Icons.lock_outline, size: 16),
+                          label: Text(w['name'] as String),
+                          onPressed: () => _unlockWorkspace(w),
+                        ),
+                    ],
+                  ),
+                ),
               Expanded(
                 child: !_loaded
                     ? const Center(
@@ -351,39 +505,41 @@ class _QuickFillWindowPageState extends State<QuickFillWindowPage>
                         ),
                       )
                     : list.isEmpty
-                        ? const Center(
-                            child: Text(
-                              '没有匹配的账号',
-                              style: TextStyle(
-                                color: ThemeConfig.secondaryTextColor,
-                                fontSize: ThemeConfig.fontSizeCaption,
-                              ),
-                            ),
-                          )
-                        : ListView.builder(
-                            controller: _scrollCtrl,
-                            itemCount: list.length,
-                            itemBuilder: (BuildContext context, int index) {
-                              final _Entry e = list[index];
-                              return _EntryTile(
-                                entry: e,
-                                highlighted: index == selected,
-                                onTap: () {
-                                  _pokeIdleTimer();
-                                  _fill(e);
-                                },
-                                onHover: (bool hovering) {
-                                  if (hovering && selected != index) {
-                                    setState(() => _selectedIndex = index);
-                                  }
-                                },
-                              );
-                            },
+                    ? const Center(
+                        child: Text(
+                          '没有可用账号，请搜索或解锁工作区',
+                          style: TextStyle(
+                            color: ThemeConfig.secondaryTextColor,
+                            fontSize: ThemeConfig.fontSizeCaption,
                           ),
+                        ),
+                      )
+                    : ListView.builder(
+                        controller: _scrollCtrl,
+                        itemCount: list.length,
+                        itemBuilder: (BuildContext context, int index) {
+                          final _Entry e = list[index];
+                          return _EntryTile(
+                            entry: e,
+                            highlighted: index == selected,
+                            onTap: () {
+                              _pokeIdleTimer();
+                              _fill(e);
+                            },
+                            onHover: (bool hovering) {
+                              if (hovering && selected != index) {
+                                setState(() => _selectedIndex = index);
+                              }
+                            },
+                          );
+                        },
+                      ),
               ),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
                 decoration: const BoxDecoration(
                   border: Border(
                     top: BorderSide(color: ThemeConfig.dividerColor),
@@ -440,9 +596,7 @@ class _EntryTile extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       child: Material(
-        color: highlighted
-            ? ThemeConfig.primarySoft
-            : Colors.transparent,
+        color: highlighted ? ThemeConfig.primarySoft : Colors.transparent,
         borderRadius: BorderRadius.circular(ThemeConfig.radiusSm),
         child: InkWell(
           onTap: onTap,
@@ -488,8 +642,10 @@ class _EntryTile extends StatelessWidget {
                 if (entry.workspace.isNotEmpty) ...<Widget>[
                   const SizedBox(width: 8),
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
                     decoration: BoxDecoration(
                       color: ThemeConfig.primarySoft,
                       borderRadius: BorderRadius.circular(ThemeConfig.radiusSm),

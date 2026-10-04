@@ -140,6 +140,7 @@ class KeyRingAutofillService : AutofillService() {
             if (signal.isCanceled) return emptyList()
             val cursor: Cursor = db.rawQuery(
                 "SELECT id, title, username, password FROM password_items " +
+                    "WHERE workspaceId NOT IN (SELECT workspaceId FROM local_workspace_locks) " +
                     "ORDER BY isFavorite DESC, datetime(updatedAt) DESC LIMIT 100",
                 null,
             )

@@ -110,3 +110,13 @@ const List<String> kSecretFieldTemplates = <String>[
   '恢复代码',
   '客服电话',
 ];
+
+/// Select an unused default name without renaming existing fields.
+String nextPasswordLabel(Iterable<String> labels) {
+  final used = labels.map((s) => s.trim()).toSet();
+  int number = 2;
+  while (used.contains('密码$number')) {
+    number++;
+  }
+  return '密码$number';
+}

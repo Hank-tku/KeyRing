@@ -83,7 +83,15 @@ void HandleForegroundCall(const std::string& method,
                           flutter::MethodResult<flutter::EncodableValue>& result) {
   if (method == "remember") {
     g_remembered_hwnd = ::GetForegroundWindow();
+    DWORD process_id = 0;
+    ::GetWindowThreadProcessId(g_remembered_hwnd, &process_id);
+    if (process_id == ::GetCurrentProcessId()) g_remembered_hwnd = nullptr;
     result.Success(flutter::EncodableValue(g_remembered_hwnd != nullptr));
+    return;
+  }
+  if (method == "isTargetActive") {
+    result.Success(flutter::EncodableValue(g_remembered_hwnd != nullptr &&
+      ::GetForegroundWindow() == g_remembered_hwnd));
     return;
   }
   if (method == "activate") {

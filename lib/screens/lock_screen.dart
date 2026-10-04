@@ -12,7 +12,13 @@ import 'passcode_screen.dart';
 /// 进入页面后自动唤起认证，无需用户手动点击。
 /// 为缓解暴力尝试，对失败做计数与临时冷却。
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key, required this.onUnlocked});
+  const LoginScreen({
+    super.key,
+    required this.onUnlocked,
+    this.autoAuthenticate = true,
+  });
+
+  final bool autoAuthenticate;
 
   final VoidCallback onUnlocked;
 
@@ -55,7 +61,7 @@ class _LoginScreenState extends State<LoginScreen> {
       _isCheckingBiometrics = false;
     });
     // 检测完成后自动唤起认证。
-    if (canAuthenticate) {
+    if (canAuthenticate && widget.autoAuthenticate) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _autoAuthenticate());
     }
   }
@@ -120,14 +126,15 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> _authenticateWithFingerprint() async {
     if (_coolingDown) return;
     try {
-      final bool authenticated = await _authService.authenticateWithBiometrics();
+      final bool authenticated = await _authService
+          .authenticateWithBiometrics();
       if (!mounted) return;
       _onAuthResult(authenticated);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('认证出错: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('认证出错: $e')));
     }
   }
 
@@ -135,9 +142,8 @@ class _LoginScreenState extends State<LoginScreen> {
     if (_coolingDown) return;
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (BuildContext context) => PasscodeScreen(
-          onCorrect: widget.onUnlocked,
-        ),
+        builder: (BuildContext context) =>
+            PasscodeScreen(onCorrect: widget.onUnlocked),
       ),
     );
   }
@@ -150,10 +156,7 @@ class _LoginScreenState extends State<LoginScreen> {
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: <Color>[
-              ThemeConfig.mainBgColor,
-              Color(0xFF0B0D12),
-            ],
+            colors: <Color>[ThemeConfig.mainBgColor, Color(0xFF0B0D12)],
           ),
         ),
         child: SafeArea(
@@ -230,8 +233,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Widget _buildUnlockButtons() {
     final bool disabled = _coolingDown;
-    final String? cooldownHint =
-        disabled ? '($_cooldownSeconds 秒后可重试)' : null;
+    final String? cooldownHint = disabled ? '($_cooldownSeconds 秒后可重试)' : null;
 
     return Column(
       children: <Widget>[
@@ -252,9 +254,12 @@ class _LoginScreenState extends State<LoginScreen> {
               style: FilledButton.styleFrom(
                 backgroundColor: ThemeConfig.primaryColor,
                 foregroundColor: const Color(0xFF0B0D12),
-                disabledBackgroundColor:
-                    ThemeConfig.primaryColor.withValues(alpha: 0.3),
-                padding: const EdgeInsets.symmetric(vertical: ThemeConfig.space12),
+                disabledBackgroundColor: ThemeConfig.primaryColor.withValues(
+                  alpha: 0.3,
+                ),
+                padding: const EdgeInsets.symmetric(
+                  vertical: ThemeConfig.space12,
+                ),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(ThemeConfig.radiusMd),
                 ),
@@ -272,7 +277,9 @@ class _LoginScreenState extends State<LoginScreen> {
               style: OutlinedButton.styleFrom(
                 foregroundColor: ThemeConfig.textColor,
                 side: const BorderSide(color: ThemeConfig.dividerColor),
-                padding: const EdgeInsets.symmetric(vertical: ThemeConfig.space12),
+                padding: const EdgeInsets.symmetric(
+                  vertical: ThemeConfig.space12,
+                ),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(ThemeConfig.radiusMd),
                 ),
@@ -295,9 +302,12 @@ class _LoginScreenState extends State<LoginScreen> {
               style: FilledButton.styleFrom(
                 backgroundColor: ThemeConfig.primaryColor,
                 foregroundColor: const Color(0xFF0B0D12),
-                disabledBackgroundColor:
-                    ThemeConfig.primaryColor.withValues(alpha: 0.3),
-                padding: const EdgeInsets.symmetric(vertical: ThemeConfig.space12),
+                disabledBackgroundColor: ThemeConfig.primaryColor.withValues(
+                  alpha: 0.3,
+                ),
+                padding: const EdgeInsets.symmetric(
+                  vertical: ThemeConfig.space12,
+                ),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(ThemeConfig.radiusMd),
                 ),
@@ -347,8 +357,7 @@ class _AutoAuthHintState extends State<_AutoAuthHint>
               animation: _controller,
               builder: (BuildContext context, Widget? child) {
                 // 三个点错峰闪烁
-                final double t =
-                    (_controller.value + i * 0.33) % 1.0;
+                final double t = (_controller.value + i * 0.33) % 1.0;
                 final double opacity = 0.3 + 0.7 * (0.5 - (t - 0.5).abs());
                 return Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 3),

@@ -12,6 +12,7 @@ import 'screens/home_screen.dart';
 import 'screens/lock_screen.dart';
 import 'screens/settings_screen.dart';
 import 'services/app_lock_state.dart';
+import 'services/background_lock_controller.dart';
 import 'services/global_hotkey_service.dart';
 import 'services/migration_service.dart';
 import 'services/password_repository.dart';
@@ -59,8 +60,11 @@ class KeyRingApp extends StatefulWidget {
 /// - 系统级全局热键在任意应用中唤起「快速填充小面板」（独立窗口）
 /// - 小面板选择密码后自动切回原应用并模拟键盘输入
 class _KeyRingAppState extends State<KeyRingApp>
-    with WindowListener, TrayListener {
+    with WindowListener, TrayListener, WidgetsBindingObserver {
   bool _unlocked = false;
+  bool _mainWindowFocused = true;
+  bool _panelVisible = false;
+  late final BackgroundLockController _backgroundLock;
   final ShortcutBus _shortcutBus = ShortcutBus();
   final GlobalHotkeyService _hotkeyService = GlobalHotkeyService();
   final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
@@ -72,9 +76,19 @@ class _KeyRingAppState extends State<KeyRingApp>
   @override
   void initState() {
     super.initState();
+    _unlocked = !AppLockState.isLocked;
+    _backgroundLock = BackgroundLockController(onLock: AppLockState.markLocked);
+    WidgetsBinding.instance.addObserver(this);
+    AppLockState.listenable.addListener(_onLockChanged);
     if (!_isDesktop) return;
 
     windowManager.addListener(this);
+    windowManager.isFocused().then((focused) {
+      if (mounted) {
+        _mainWindowFocused = focused;
+        _updateForeground();
+      }
+    });
     // 点关闭按钮 = 隐藏到菜单栏（真正退出走托盘菜单）。
     windowManager.setPreventClose(true);
 
@@ -84,8 +98,20 @@ class _KeyRingAppState extends State<KeyRingApp>
     _hotkeyService.init(onTriggered: _toggleQuickFill);
   }
 
+  void _onLockChanged() {
+    if (!mounted) return;
+    setState(() => _unlocked = !AppLockState.isLocked);
+    if (_unlocked) _backgroundLock.didUnlock();
+    if (AppLockState.isLocked) {
+      _navigatorKey.currentState?.popUntil((route) => route.isFirst);
+    }
+  }
+
   @override
   void dispose() {
+    AppLockState.listenable.removeListener(_onLockChanged);
+    WidgetsBinding.instance.removeObserver(this);
+    _backgroundLock.dispose();
     if (_isDesktop) {
       windowManager.removeListener(this);
       TrayManager.instance.removeListener(this);
@@ -104,6 +130,10 @@ class _KeyRingAppState extends State<KeyRingApp>
   QuickFillHost _ensureQuickFillHost() {
     return _quickFillHost ??= QuickFillHost(
       repository: widget.repository,
+      onVisibilityChanged: (visible) {
+        _panelVisible = visible;
+        _updateForeground();
+      },
       onFeedback: (String message, bool success) {
         debugPrint('quick fill: $message');
       },
@@ -111,11 +141,6 @@ class _KeyRingAppState extends State<KeyRingApp>
   }
 
   Future<void> _toggleQuickFill() async {
-    // 锁定状态下热键绝不弹出条目列表：只唤起主窗口（其上已是解锁界面）。
-    if (AppLockState.isLocked) {
-      await _showMainWindow();
-      return;
-    }
     await _ensureQuickFillHost().toggle();
   }
 
@@ -133,9 +158,7 @@ class _KeyRingAppState extends State<KeyRingApp>
         MenuItem(
           key: 'quick_fill',
           // macOS 的 NSMenu 中 tab 后的文字会右对齐显示，等效系统快捷键样式。
-          label: mac && hotkey.isNotEmpty
-              ? '快速填充…\t$hotkey'
-              : '快速填充…',
+          label: mac && hotkey.isNotEmpty ? '快速填充…\t$hotkey' : '快速填充…',
         ),
         MenuItem(key: 'lock', label: '立即锁定'),
         MenuItem.separator(),
@@ -197,7 +220,47 @@ class _KeyRingAppState extends State<KeyRingApp>
 
   @override
   void onWindowClose() {
+    _mainWindowFocused = false;
+    _updateForeground();
     windowManager.hide();
+  }
+
+  void _updateForeground() =>
+      _backgroundLock.setForeground(_mainWindowFocused || _panelVisible);
+
+  @override
+  void onWindowFocus() {
+    _mainWindowFocused = true;
+    _updateForeground();
+  }
+
+  @override
+  void onWindowBlur() {
+    _mainWindowFocused = false;
+    _updateForeground();
+  }
+
+  @override
+  void onWindowMinimize() {
+    _mainWindowFocused = false;
+    _updateForeground();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_isDesktop) {
+      if (state == AppLifecycleState.hidden ||
+          state == AppLifecycleState.paused ||
+          state == AppLifecycleState.detached) {
+        _mainWindowFocused = false;
+        _updateForeground();
+      } else if (state == AppLifecycleState.resumed) {
+        _backgroundLock.checkDeadline();
+      }
+    } else {
+      // Inactive includes system authentication; it only starts the grace period.
+      _backgroundLock.setForeground(state == AppLifecycleState.resumed);
+    }
   }
 
   // ---- TrayListener：菜单栏交互 ----
@@ -210,7 +273,7 @@ class _KeyRingAppState extends State<KeyRingApp>
       case 'quick_fill':
         _toggleQuickFill();
       case 'lock':
-        _shortcutBus.fire(AppShortcutAction.lockNow);
+        AppLockState.markLocked();
       case 'settings':
         _openSettings();
       case 'quit':
@@ -267,17 +330,20 @@ class _KeyRingAppState extends State<KeyRingApp>
               shortcutBus: _shortcutBus,
               hotkeyService: _hotkeyService,
             )
-          : LoginScreen(onUnlocked: () {
-              AppLockState.markUnlocked();
-              setState(() => _unlocked = true);
-            }),
+          : LoginScreen(
+              autoAuthenticate: !_isDesktop,
+              onUnlocked: () {
+                AppLockState.markUnlocked();
+                setState(() => _unlocked = true);
+              },
+            ),
       // 定义命名路由表
       routes: {
         '/home': (context) => HomeScreen(
-              repository: widget.repository,
-              shortcutBus: _shortcutBus,
-              hotkeyService: _hotkeyService,
-            ),
+          repository: widget.repository,
+          shortcutBus: _shortcutBus,
+          hotkeyService: _hotkeyService,
+        ),
       },
     );
   }

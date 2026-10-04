@@ -67,7 +67,10 @@ class CredentialProviderViewController: ASCredentialProviderViewController,
     // MARK: - UITableViewDelegate
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        let e = entries[indexPath.row]
+        let selectedId = entries[indexPath.row].id
+        guard let e = CredentialStore().loadEntries().first(where: { $0.id == selectedId }) else {
+            cancelAction(); return
+        }
         let credential = ASPasswordCredential(
             user: e.username, password: e.password)
         extensionContext.completeRequest(
@@ -110,7 +113,7 @@ private final class Value1Cell: UITableViewCell {
 /// 从 App Group 共享容器只读加载 KeyRing 数据库条目。
 struct CredentialStore {
     /// 与主 app 一致的 App Group ID（两个 target 的 entitlements 都要配）。
-    static let appGroupId = "group.com.example.key_ring.shared"
+    static let appGroupId = "group.com.example.keyRing.shared"
 
     func loadEntries() -> [(id: String, title: String, username: String, password: String)] {
         guard
@@ -118,7 +121,8 @@ struct CredentialStore {
                 forSecurityApplicationGroupIdentifier: Self.appGroupId)
         else { return [] }
 
-        let dbPath = container.appendingPathComponent("KeyRing.db").path
+        guard UserDefaults(suiteName: Self.appGroupId)?.bool(forKey: "autofillProjectionReady") == true else { return [] }
+        let dbPath = container.appendingPathComponent("KeyRing-autofill-v1.db").path
         guard FileManager.default.fileExists(atPath: dbPath) else { return [] }
 
         var db: OpaquePointer?
